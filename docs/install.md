@@ -7,7 +7,7 @@ for a normal scan.
 ## npm
 
 ```bash
-npm i -g lv24-vigil@latest     # or pin a release: lv24-vigil@0.8.0
+npm i -g lv24-vigil@latest     # or pin a release: lv24-vigil@0.9.3
 vigil version
 ```
 
@@ -19,7 +19,7 @@ platform package, and `vigil` then exits with `platform package ... is not
 installed`.
 
 Releases are published from GitHub Actions with npm Trusted Publishing (OIDC).
-`0.8.0` is the current version on the `latest` tag. Pipeline, verification and
+`0.9.3` is the current version on the `latest` tag. Pipeline, verification and
 re-run steps: [release.md](release.md).
 
 For a one-off run without a global install:
@@ -28,6 +28,20 @@ For a one-off run without a global install:
 npx -y lv24-vigil scan --no-llm
 npx -y lv24-vigil mcp
 ```
+
+## MCP Registry
+
+Vigil is listed in the official MCP Registry as
+`io.github.LevapVeeskela/vigil`; the npm package carries `mcpName` and the
+repository ships the matching `server.json`, so registry-aware clients can add
+it and still run the same stdio server:
+
+```bash
+npx -y lv24-vigil mcp
+```
+
+Registry layout, publishing and verification: [mcp-registry.md](mcp-registry.md).
+Other MCP catalogues Vigil is submitted to: [mcp-directories.md](mcp-directories.md).
 
 ## Go
 
@@ -74,6 +88,50 @@ cd lv24-vigil
 Useful options: `-Version vX.Y.Z`, `-Dir PATH`, `-Yes`, `-Uninstall`. The
 installer never requires administrator rights and never stores secrets.
 
+## Linux packages
+
+Every release also ships native packages for `amd64` and `arm64`, built from the
+same `-ldflags` as the binaries, so `vigil version` inside a package reports the
+release tag:
+
+```text
+vigil-<version>-linux-amd64.deb   vigil-<version>-linux-arm64.deb
+vigil-<version>-linux-amd64.rpm   vigil-<version>-linux-arm64.rpm
+vigil-<version>-linux-amd64.apk   vigil-<version>-linux-arm64.apk
+```
+
+Download the file for your distribution from the release page and install it
+with the local path (`0.9.3`, `amd64` shown):
+
+```bash
+sudo apt install ./vigil-0.9.3-linux-amd64.deb                # Debian, Ubuntu
+sudo dnf install --nogpgcheck ./vigil-0.9.3-linux-amd64.rpm   # Fedora, RHEL, openSUSE
+sudo apk add --allow-untrusted ./vigil-0.9.3-linux-amd64.apk  # Alpine
+vigil version
+```
+
+Each package installs the binary, a `/usr/bin/vigil` symlink and the license as
+`/usr/share/doc/vigil/LICENSE`; deb and rpm declare `Provides: vigil`, so they
+do not conflict with a distribution package of the same name. The packages carry
+no distribution key of their own, which is why `dnf` needs `--nogpgcheck` and
+`apk` needs `--allow-untrusted`. Integrity comes from `checksums.txt`, which
+lists the packages and is signed with cosign keyless:
+[release.md](release.md#verify-a-release).
+
+## AUR (Arch Linux)
+
+The AUR package `vigil-bin` installs the published release binary instead of
+building from source:
+
+```bash
+yay -S vigil-bin          # or: paru -S vigil-bin
+vigil version
+```
+
+The PKGBUILD downloads the release asset, checks it against the published
+`checksums.txt` and installs the binary and license. Details, manual build and
+verification: [aur.md](aur.md).
+
 ## Standalone binaries
 
 Each GitHub release publishes six raw binaries and a `checksums.txt`:
@@ -98,32 +156,49 @@ allowing the binary in System Settings if it was downloaded through a browser.
 
 ## Container
 
-The repository includes a distroless Dockerfile. Build it from the repository
-root:
+Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to
+GitHub Container Registry with every release:
 
 ```bash
-docker build -t lv24-vigil .
+docker pull ghcr.io/levapveeskela/lv24-vigil:0.9.3
+docker run --rm -v "$PWD:/workspace" \
+  ghcr.io/levapveeskela/lv24-vigil:0.9.3 scan --no-llm --path /workspace
 ```
 
-The image runs as a non-root user and uses `/workspace` as its working directory:
+The image is distroless (`gcr.io/distroless/static-debian12:nonroot`): no shell,
+no package manager, entrypoint `vigil`, user `nonroot:nonroot`, working directory
+`/workspace`. Tags are `<version>` (`0.9.3`), `<major>.<minor>` (`0.9`), `latest`
+(non-prerelease only) and `sha-<commit>`. A tag can move; pin the manifest-list
+digest in CI:
 
 ```bash
-docker run --rm \
-  -v "$PWD:/workspace" \
-  -w /workspace \
-  -e OPENAI_API_KEY \
-  lv24-vigil scan
+docker buildx imagetools inspect ghcr.io/levapveeskela/lv24-vigil:0.9.3 \
+  --format '{{json .Manifest}}' | jq -r .digest
+
+docker run --rm -v "$PWD:/workspace" \
+  ghcr.io/levapveeskela/lv24-vigil@sha256:<digest> scan --no-llm --path /workspace
 ```
 
-For a deterministic scan, no key is needed:
-
-```bash
-docker run --rm -v "$PWD:/workspace" -w /workspace lv24-vigil scan --no-llm
-```
+The `container` workflow builds with `provenance: true` and `sbom: true`, so a
+BuildKit SLSA provenance record and an SPDX SBOM are attached to the image; the
+run summary prints the tags, the digest and both platforms. The image itself is
+not cosign-signed, so that digest is the integrity anchor. Inspecting the
+attestations, the image limitations and the tag table:
+[container.md](container.md).
 
 On PowerShell, replace `$PWD` with `${PWD}` or an absolute path. The container
 does not include Docker and does not scan other containers; it runs Vigil against
 the mounted tree only.
+
+### Build it locally
+
+The repository also contains the distroless Dockerfile, so you can build the same
+image from a checkout:
+
+```bash
+docker build -t lv24-vigil .
+docker run --rm -v "$PWD:/workspace" -w /workspace lv24-vigil scan --no-llm
+```
 
 ## Verify the install
 
@@ -152,7 +227,8 @@ vigil scan
 ```
 
 Provider setup: [providers.md](providers.md). Commands: [cli.md](cli.md). MCP
-clients: [mcp.md](mcp.md). CI: [ci.md](ci.md).
+clients: [mcp.md](mcp.md). CI: [ci.md](ci.md). Local hooks, including the
+[pre-commit](https://pre-commit.com) framework: [pre-commit.md](pre-commit.md).
 
 ## Updating
 
@@ -161,7 +237,11 @@ clients: [mcp.md](mcp.md). CI: [ci.md](ci.md).
 - installer: run it again, or pass `--force` / `-Force` to reinstall the same
   version
 - standalone: download the new binary and replace the old one
-- container: rebuild the image
+- Debian/Ubuntu, Fedora/RHEL/openSUSE, Alpine: install the new `.deb`/`.rpm`/
+  `.apk` asset; the package replaces the previous one
+- Arch Linux (AUR): `yay -Syu vigil-bin` once the PKGBUILD version is bumped
+- container: `docker pull ghcr.io/levapveeskela/lv24-vigil:<new-version>`, or
+  rebuild the local image
 
 Check the changelog before a major update: [../CHANGELOG.md](../CHANGELOG.md).
 
@@ -172,6 +252,9 @@ Check the changelog before a major update: [../CHANGELOG.md](../CHANGELOG.md).
 - Windows installer: `.\installers\windows\install.ps1 -Uninstall`
 - Go: remove the binary from `$(go env GOPATH)/bin`
 - standalone: delete the binary
+- Linux package: `sudo apt remove vigil`, `sudo dnf remove vigil` or
+  `sudo apk del vigil`
+- Arch Linux (AUR): `sudo pacman -Rns vigil-bin`
 
 Vigil does not install a daemon, a service, a scheduled task or a browser
 extension. Scan history lives in the repository under `.vigil/scans` or in the

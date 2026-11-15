@@ -4,6 +4,129 @@ All notable changes to Vigil are documented here. The format is loosely based on
 Keep a Changelog; versions follow semantic versioning once the public API is
 stable.
 
+## 0.9.3 - 2026-11-15
+
+Distribution metadata release. **No code or rule changes**: 263 rules, 14 MCP
+tools.
+
+### Added
+
+- Published to the official MCP Registry as
+  `io.github.LevapVeeskela/vigil` v0.9.3: `mcpName` in the npm package and a
+  `server.json` manifest, so registry-aware clients can resolve and install the
+  stdio server (`npx -y lv24-vigil mcp`). Layout and verification:
+  [docs/mcp-registry.md](docs/mcp-registry.md).
+- An AUR package (`vigil-bin`) built from the published release assets, with
+  build and verification steps in [docs/aur.md](docs/aur.md).
+- MCP directory and CII submission preparation, tracked in
+  [docs/mcp-directories.md](docs/mcp-directories.md).
+
+### Changed
+
+- Version references and the composite action default move to `0.9.3`. Release
+  assets are unchanged from 0.9.2.
+
+## 0.9.2 - 2026-11-15
+
+Release-pipeline fix. **No code or rule changes**: 263 rules, 14 MCP tools.
+
+### Fixed
+
+- The release workflow installs cosign after the GoReleaser build, so
+  goreleaser-action verifies its own binary with the bundled cosign. The 0.9.1
+  tag failed before publishing; 0.9.2 supersedes it. Keyless signing still
+  covers `checksums.txt` and the release assets are unchanged.
+
+## 0.9.1 - 2026-11-15
+
+No rule changes (263 rules, ten families, 14 MCP tools): the same engine as
+0.9.0, delivered through more channels and attributable end to end.
+
+### Added
+
+- Native Linux packages: `vigil-<version>-linux-<arch>.deb`, `.rpm` and `.apk`
+  for amd64 and arm64, built by GoReleaser from the same `-ldflags` as the
+  binaries. Each installs the binary, a `/usr/bin/vigil` symlink and the
+  license; deb and rpm declare `Provides: vigil`.
+- A CycloneDX 1.6 self-SBOM asset (`vigil-sbom-<version>.cdx.json`) generated on
+  the runner from the tagged tree with `vigil sbom`.
+- Keyless cosign signing: `checksums.txt.sigstore.json`, a bundle over
+  `checksums.txt` and therefore over all six binaries and six Linux packages.
+- SLSA build provenance from `actions/attest-build-provenance` for every file in
+  `release-assets/`, checked with `gh attestation verify`.
+- A multi-arch container image at `ghcr.io/levapveeskela/lv24-vigil`
+  (`linux/amd64`, `linux/arm64`, distroless, `nonroot`) with BuildKit
+  provenance and SPDX SBOM attestations, published by
+  `.github/workflows/container.yml` for a `v*` tag or on demand.
+- `pre-commit` hooks (`.pre-commit-hooks.yaml`: `vigil-scan` and the opt-in
+  `vigil-mcp-audit`) and [docs/pre-commit.md](docs/pre-commit.md).
+- OpenSSF Scorecard (`.github/workflows/scorecard.yml`) with published results,
+  and the Scorecard, pre-commit and Go Reference badges in both READMEs.
+
+### Changed
+
+- The release pipeline fails when a tag does not produce exactly six binaries,
+  six Linux packages and `checksums.txt`, before anything is published.
+- `action.yml` defaults to `0.9.1`; the documented pin is `@v0.9.1`.
+- Install docs cover the GHCR image (tags, digest pinning, attestation checks)
+  and the deb/rpm/apk packages; the READMEs link the pre-commit setup.
+
+## 0.9.0 - 2026-11-15
+
+263 rules (42 new since 0.8.0), inline suppression, an offline MCP configuration
+audit and SBOM export.
+
+### Added
+
+- 42 deterministic rules since 0.8.0. The security-tool research pass added 27:
+  provider-specific secrets (1Password, age, Docker Hub, Discord, Stripe webhook
+  secrets, PyPI, RubyGems, Terraform Cloud), LDAP/XPath injection, unsafe
+  SnakeYAML, Jinja2 `autoescape=False`, an exposed `phpinfo()`, zip-slip and
+  upload path traversal, SSH
+  host-key verification, five mobile/desktop anti-RE checks, five
+  Terraform/Kubernetes/Compose checks and a CI scanner-gate check.
+- 15 more deterministic rules: `VGL-MCP-001`–`VGL-MCP-010` audit MCP server
+  configuration posture (unpinned packages, literal secrets, cleartext
+  endpoints, TLS bypass), `VGL-AUTH-023` covers JWT key material taken from the
+  token header, `VGL-WEB-026` covers a static file server rooted at the project
+  root, `VGL-INJ-063` covers Django raw SQL APIs receiving formatted SQL,
+  `VGL-INJ-064` covers PHP XML parsing with entity substitution or external
+  DTDs, and `VGL-INJ-065` covers Ruby `raw`/`html_safe` rendering request data.
+  Catalog: **263 rules** in ten families.
+- Inline suppression: a `vigil:ignore` comment on the finding's line or the line
+  above suppresses matching findings, optionally limited to rule IDs and
+  annotated with `reason="..."` and `until=YYYY-MM-DD`. Suppressed findings stay
+  in the result with `suppressed: true`; an expired or malformed directive emits
+  a warning and suppresses nothing. Disable per run with
+  `--no-inline-suppressions`, or in configuration with
+  `scan.inline_suppressions: false`.
+- `vigil mcp-audit [path] [--user]` and the `vigil_mcp_audit` MCP tool run only
+  the `VGL-MCP` rules over MCP server configuration files (`.mcp.json`,
+  `mcp.json`, `mcp-config.json`, `claude_desktop_config.json`, `opencode.json`,
+  `*.mcp.json` and YAML variants). Deterministic and offline: no configured
+  server is started and no endpoint is contacted.
+- `vigil sbom [path] [--format cyclonedx|spdx] [--include-dev]` exports the
+  declared dependency inventory as CycloneDX 1.6 (default) or SPDX 2.3 JSON.
+  The document is reproducible (inventory-derived serial number and SPDX
+  namespace, `SOURCE_DATE_EPOCH` timestamp), offline, and does not resolve
+  version ranges.
+- Python dependency collection covers `requirements*.txt`, `-r` includes and
+  PEP 621 `pyproject.toml` dependencies.
+
+### Fixed
+
+- OSV advisories that the source withdrew are no longer reported; `MAL-*`
+  records are critical malware findings with remove/rotate remediation.
+- The pre-commit hook scans the staged diff (`git diff --cached`) instead of the
+  working tree, so a staged-then-reverted secret is still caught.
+- `VGL-WEB-002` covers Java and PHP traversal sinks; `VGL-WEB-003` covers Java
+  `sendRedirect` and Spring `redirect:`.
+
+### Changed
+
+- Documentation counts and family tables now report 263 rules, ten families and
+  14 MCP tools.
+
 ## 0.8.0 - 2026-11-11
 
 Upgrade from 0.7.x if you use `vigil dependencies` or `scan.osv`: 0.7.x

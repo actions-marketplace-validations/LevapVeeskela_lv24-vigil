@@ -10,10 +10,13 @@
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
 [![MCP](https://img.shields.io/badge/MCP-stdio-6C5CE7)](docs/mcp.md)
 [![OpenCode Go](https://img.shields.io/badge/OpenCode_Go-supported-6C5CE7)](docs/providers.md)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/LevapVeeskela/lv24-vigil/badge)](https://securityscorecards.dev/viewer/?uri=github.com/LevapVeeskela/lv24-vigil)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://pre-commit.com)
+[![Go Reference](https://pkg.go.dev/badge/github.com/levapveeskela/lv24-vigil.svg)](https://pkg.go.dev/github.com/levapveeskela/lv24-vigil)
 
 **Docs:** English · [Русский](README.ru.md) · [Documentation](docs/) · [llms.txt](llms.txt)
 
-> **Your code. Your model. Your findings.** Vigil runs 221 deterministic
+> **Your code. Your model. Your findings.** Vigil runs 263 deterministic
 > security rules over a repository, then — only if you ask — sends the minimum
 > context to the model you already pay for to triage findings, review risky
 > code, propose fixes and write a threat model. One static Go binary, one MCP
@@ -23,7 +26,7 @@
 | --- | --- | --- |
 | [Install](#install) · [See it work](#see-it-work) · [Quickstart](#60-second-quickstart) | [MCP setup](#mcp-setup) · [For AI agents](#for-ai-agents) · [Providers](#providers) · [Rules](#rules) | [CI & SARIF](#ci-sarif-and-precheck) · [Safety](#safety) · [Docs](#documentation) |
 
-> **Status: 0.8.x.** The deterministic engine, CLI and MCP server are usable
+> **Status: 0.9.x.** The deterministic engine, CLI and MCP server are usable
 > today. LLM output is advisory, rule coverage keeps growing, and Vigil is not a
 > replacement for a pentest. Treat every finding as a lead to verify, not a
 > verdict.
@@ -62,7 +65,7 @@ vigil fix VGL-XXXXXXXXXX --apply  # write it to the working tree, never commit
 - **Your model, your keys.** OpenAI, Anthropic, Gemini, OpenRouter, Groq,
   DeepSeek, Mistral, xAI, OpenCode Go, Ollama, LM Studio, a local CLI or any
   OpenAI-compatible endpoint. No proxy, no Vigil account, no telemetry.
-- **Deterministic first.** All 221 rules run before any model call. A provider
+- **Deterministic first.** All 263 rules run before any model call. A provider
   outage cannot hide a hardcoded secret, a shell injection or a disabled JWT
   check.
 - **Fits the agent you already use.** One stdio MCP server for OpenCode, Claude
@@ -80,16 +83,18 @@ vigil fix VGL-XXXXXXXXXX --apply  # write it to the working tree, never commit
 
 | | Feature | What it does |
 | --- | --- | --- |
-| 🔍 | **221 deterministic rules** | Secrets, injection, crypto, auth, web, config/IaC, CI, dependencies and anti-RE hardening — no model required |
+| 🔍 | **263 deterministic rules** | Secrets, injection, crypto, auth, web, config/IaC, CI, dependencies, MCP configuration and anti-RE hardening — no model required |
 | 🧠 | **LLM triage** | Ranks and filters findings with your model; deterministic severity stays visible |
 | 🧪 | **Deep review** | Reads bounded windows of high-risk files and adds `VGL-AI-001` findings |
 | 🛠 | **Fix diffs** | Produces a validated unified diff; `--apply` writes the working tree only |
 | 🗺 | **Threat model** | Generates a STRIDE-style Markdown threat model |
-| 🔌 | **MCP server** | 13 tools, 4 resources and 5 prompts over stdio |
+| 🔌 | **MCP server** | 14 tools, 4 resources and 5 prompts over stdio |
 | 📊 | **Reports** | Markdown, JSON, SARIF 2.1.0 and self-contained HTML |
 | 🧾 | **Baseline** | Suppresses accepted findings so only new issues fail a gate |
 | 🧰 | **Command provider** | Reuses an already-authenticated local CLI without storing an API key |
 | 🛡 | **Dependency advisories** | Reads lockfiles and queries `api.osv.dev` for known public advisories (opt-in network); `vigil_dependencies` |
+| 🧩 | **MCP config audit** | `VGL-MCP` rules for unpinned server packages, literal secrets, cleartext endpoints, disabled TLS and dangerous mounts; CLI and `vigil_mcp_audit` |
+| 📦 | **SBOM** | CycloneDX 1.6 or SPDX 2.3 JSON from the manifests and lockfiles Vigil already reads; offline |
 | 🔒 | **Anti-RE hardening** | Flags missing release controls and the artifact surfaces a reverse-engineering toolkit (REA) reads: symbols/DWARF, Electron fuses, JS minify, WebView, Hermes, iOS testability, plus debug signing, debuggable builds, backup/cleartext, inspector flags and source maps |
 | 🚦 | **CI gate** | `--fail-on`, exit code `2`, SARIF upload and `vigil precheck` |
 
@@ -127,7 +132,7 @@ platform packages. Keep optional dependencies enabled — `--no-optional` and
 Do not pin `0.5.0`: the tag and the npm package are immutable and still
 installable, but the CI examples on that tag are stale (`inputs.fail-on`, an
 unguarded GitLab pre-check). The binaries are fine; the templates are not. Use
-`0.8.0` or newer, or `@latest`.
+`0.9.3` or newer, or `@latest`.
 
 Requirements: Node.js 18+ for npm, Go 1.27+ for `go install`; release binaries
 and installers need no runtime.
@@ -158,17 +163,38 @@ Each release also publishes six raw binaries and `checksums.txt` on the
 [releases page](https://github.com/LevapVeeskela/lv24-vigil/releases). Options
 and manual verification: [docs/install.md](docs/install.md).
 
-### Container (local build)
+### Other channels
 
-There is no prebuilt Vigil image. Build the distroless Dockerfile from this
-repository:
+Arch Linux: the AUR package builds from the published release
+(`yay -S vigil-bin`), with the PKGBUILD and verification steps in
+[docs/aur.md](docs/aur.md).
+
+MCP: Vigil is listed in the official MCP Registry as
+`io.github.LevapVeeskela/vigil`; the npm package carries `mcpName` and the
+repository ships `server.json`, so registry-aware clients can install it as
+`npx -y lv24-vigil mcp`. Registry layout, publishing and verification:
+[docs/mcp-registry.md](docs/mcp-registry.md). Other MCP catalogues and the status
+of each submission: [docs/mcp-directories.md](docs/mcp-directories.md).
+
+### Container
+
+A prebuilt multi-arch image (`linux/amd64` and `linux/arm64`, distroless and
+running as `nonroot`) is published to GitHub Container Registry for every
+release:
+
+```bash
+docker run --rm -v "$PWD:/workspace" ghcr.io/levapveeskela/lv24-vigil:0.9.3 scan --no-llm --path /workspace
+```
+
+The local `Dockerfile` builds the same image if you prefer:
 
 ```bash
 docker build -t lv24-vigil .
 docker run --rm -v "$PWD:/workspace" -w /workspace lv24-vigil scan --no-llm
 ```
 
-The image runs as a non-root user. Details: [docs/install.md](docs/install.md#container).
+Tags, digest pinning, provenance/SBOM attestations and limitations:
+[docs/install.md](docs/install.md#container) and [docs/container.md](docs/container.md).
 
 ### Verify
 
@@ -204,6 +230,8 @@ vigil fix VGL-XXXXXXXXXX                         # proposed diff
 vigil fix VGL-XXXXXXXXXX --apply                 # write it, never commit
 vigil threat-model                               # STRIDE-style Markdown, needs a model
 vigil report --format html > report.html         # render the last stored scan
+vigil mcp-audit . --fail-on high                 # MCP config posture (VGL-MCP)
+vigil sbom . --output sbom.cdx.json              # CycloneDX 1.6 bill of materials
 ```
 
 `vigil scan` with no path scans the current directory. A finding ID comes from a
@@ -260,12 +288,28 @@ If Vigil is installed globally, use `["vigil", "mcp"]` instead of `npx`. Start
 the client from the repository you want to scan; `vigil mcp --root DIR` sets a
 different project root.
 
-The server exposes 13 tools — `vigil_scan`, `vigil_review`, `vigil_explain`,
-`vigil_fix`, `vigil_threat_model`, `vigil_status`, `vigil_rules`, `vigil_hardening`, `vigil_dependencies`,
-`vigil_baseline`, `vigil_report`, `vigil_verify`, `vigil_history` — plus resources
-`vigil://status`, `vigil://rules`, `vigil://scan/last`, `vigil://scan/<id>` and
-prompts `security_review`, `threat_model`, `fix_finding`, `anti_re_hardening`, `dependency_audit`. Deterministic tools
-work without a model; `vigil_fix` and `vigil_threat_model` need one and say so.
+The server exposes 14 tools:
+
+| Tool | What it does | Needs |
+| --- | --- | --- |
+| `vigil_scan` | Deterministic scan with optional LLM triage; optional OSV | model optional; OSV optional |
+| `vigil_review` | Reviews changed lines or a supplied diff | model optional; OSV optional |
+| `vigil_explain` | Explains one finding and a fix direction | model |
+| `vigil_fix` | Proposes a minimal diff; `apply=true` writes it | model |
+| `vigil_threat_model` | STRIDE-style threat model | model |
+| `vigil_status` | Provider, model, engine, store, baseline, last scan | none |
+| `vigil_rules` | Rule catalog with IDs, severities and categories | none |
+| `vigil_hardening` | VGL-ARE release-hardening gaps, grouped by platform | offline |
+| `vigil_mcp_audit` | VGL-MCP configuration gaps in MCP server configs | offline |
+| `vigil_dependencies` | Declared packages checked against OSV | network to OSV |
+| `vigil_baseline` | List, add, remove or clear accepted findings | baseline file |
+| `vigil_report` | Renders a stored scan as md/json/sarif/html | local store |
+| `vigil_verify` | Re-checks whether a finding is still present | none |
+| `vigil_history` | Lists recent scans from the local store | local store |
+
+The same server exposes resources `vigil://status`, `vigil://rules`,
+`vigil://scan/last`, `vigil://scan/<id>` and prompts `security_review`,
+`threat_model`, `fix_finding`, `anti_re_hardening`, `dependency_audit`.
 Only `vigil_fix` with `apply=true` changes source files.
 
 Then ask your agent:
@@ -297,8 +341,9 @@ prose.
   "fix_apply": "vigil fix <finding-id> --apply",
   "mcp_tools": [
     "vigil_scan", "vigil_review", "vigil_explain", "vigil_fix",
-    "vigil_threat_model", "vigil_status", "vigil_rules", "vigil_baseline",
-    "vigil_report", "vigil_verify", "vigil_history"
+    "vigil_threat_model", "vigil_status", "vigil_rules", "vigil_hardening",
+    "vigil_mcp_audit", "vigil_dependencies", "vigil_baseline", "vigil_report",
+    "vigil_verify", "vigil_history"
   ],
   "exit_codes": { "0": "clean", "1": "error", "2": "findings at or above --fail-on" },
   "docs_index": "llms.txt"
@@ -309,7 +354,7 @@ Rules that matter when you drive it:
 
 1. **Install `lv24-vigil` only.** Never install `@lv24/vigil-<os>-<cpu>`
    directly; it is an optional dependency selected by the launcher.
-2. **No model? Use `--no-llm`.** All 221 deterministic rules still run and
+2. **No model? Use `--no-llm`.** All 263 deterministic rules still run and
    produce findings. A missing model is a warning, not a failed scan.
 3. **Do not parse the human summary.** Use `--format json`, `vigil status
    --json`, or an MCP tool. stdout carries the report; logs go to stderr.
@@ -371,7 +416,7 @@ endpoint for any provider; `custom` requires it. Full reference:
 
 ## Rules
 
-221 deterministic rules in nine families. They are pure: they read a file,
+263 deterministic rules in ten families. They are pure: they read a file,
 never write, never execute scanned code and never make a network call. The CLI is
 the authoritative catalog:
 
@@ -381,15 +426,16 @@ vigil rules
 
 | Family | Prefix | Rules | Looks for |
 | --- | --- | ---: | --- |
-| Secrets | `VGL-SEC` | 29 | Cloud keys, tokens, private keys, connection strings, `.env` leaks |
-| Injection | `VGL-INJ` | 47 | SQL, shell, eval, XSS, deserialization, SSTI, prototype pollution |
+| Secrets | `VGL-SEC` | 37 | Cloud keys, tokens, private keys, connection strings, `.env` leaks |
+| Injection | `VGL-INJ` | 54 | SQL, shell, eval, XSS, deserialization, SSTI, prototype pollution |
 | Crypto | `VGL-CRY` | 16 | Weak hashes/ciphers, ECB, static IVs, bad randomness, disabled TLS |
-| Auth | `VGL-AUTH` | 17 | JWT verification, cookie flags, CORS with credentials, CSRF, defaults |
-| Web | `VGL-WEB` | 18 | SSRF, path traversal, open redirect, headers, debug surfaces |
-| Config / IaC | `VGL-CFG` | 37 | Docker, Compose, Kubernetes, Terraform, nginx, committed env files |
-| CI | `VGL-CI` | 19 | Unpinned actions, `pull_request_target`, script injection, secret logs |
+| Auth | `VGL-AUTH` | 19 | JWT verification, cookie flags, CORS with credentials, CSRF, defaults |
+| Web | `VGL-WEB` | 22 | SSRF, path traversal, open redirect, headers, debug surfaces |
+| Config / IaC | `VGL-CFG` | 42 | Docker, Compose, Kubernetes, Terraform, nginx, committed env files |
+| CI | `VGL-CI` | 20 | Unpinned actions, `pull_request_target`, script injection, secret logs |
 | Dependencies | `VGL-DEP` | 15 | Lockfiles, wildcard ranges, git/HTTP installs, TLS bypass |
-| Anti-RE | `VGL-ARE` | 23 | Missing mobile/desktop hardening: release obfuscation, debug signing, debuggable builds, backup/cleartext, plist exceptions, inspector flags, source maps, plus Rust symbols/DWARF, .NET, iOS testability and symbols, Electron fuses/ASAR, JS minify, WebView and Hermes. Mapping: [docs/anti-re-hardening.md](docs/anti-re-hardening.md) |
+| Anti-RE | `VGL-ARE` | 28 | Missing mobile/desktop hardening: release obfuscation, debug signing, debuggable builds, backup/cleartext, plist exceptions, inspector flags, source maps, plus Rust symbols/DWARF, .NET, iOS testability and symbols, Electron fuses/ASAR, JS minify, WebView and Hermes. Mapping: [docs/anti-re-hardening.md](docs/anti-re-hardening.md) |
+| MCP | `VGL-MCP` | 10 | MCP server configuration: unpinned packages, literal secrets in env/headers/args, cleartext endpoints, disabled TLS, dangerous mounts, auto-approval and prompt-injection surfaces |
 
 Representative IDs: `VGL-SEC-002` (critical, AWS secret key), `VGL-INJ-019`
 (critical, Java deserialization), `VGL-CRY-011` (critical, JWT `none`),
@@ -397,7 +443,8 @@ Representative IDs: `VGL-SEC-002` (critical, AWS secret key), `VGL-INJ-019`
 SSRF), `VGL-CFG-009` (high, Docker socket), `VGL-CI-002` (critical,
 `pull_request_target` checkout), `VGL-DEP-006` (high, npm TLS off),
 `VGL-ARE-003` (high, debuggable Android manifest), `VGL-ARE-010` (high, iOS
-`get-task-allow`).
+`get-task-allow`), `VGL-MCP-002` (critical, literal secret in an MCP server
+definition).
 
 Model-only findings use `VGL-AI-001` and are marked as LLM-sourced. OSV findings
 use `VGL-OSV-<advisory>` and appear only when `scan.osv` is enabled. Disable a
@@ -407,6 +454,11 @@ rule when it does not fit the project, not to make a report green:
 scan:
   disable_rules: [VGL-DEP-001]
 ```
+
+For one-off cases, suppress a finding with a comment directive:
+`// vigil:ignore VGL-SEC-001 reason="test fixture"`. Rule lists, `*`,
+`reason=`, `until=YYYY-MM-DD`, precedence and diff/review behavior:
+[docs/rules.md#inline-suppressions](docs/rules.md#inline-suppressions).
 
 Severity, confidence, baseline and masking details:
 [docs/rules.md](docs/rules.md).
@@ -458,7 +510,7 @@ vigil hook status
 vigil hook uninstall
 ```
 
-The hook runs `vigil scan --changed --base HEAD --no-llm --fail-on high --quiet`
+The hook runs `git diff --cached --unified=0 --no-color | vigil scan --diff - --no-llm --fail-on high --quiet`
 for a commit. A pre-push hook diffs against `@{upstream}` and falls back to
 `HEAD~1` (then `HEAD` on a single-commit branch). It is marked
 `# managed by lv24-vigil`, honours `VIGIL_BIN` (default `vigil`) and never
@@ -466,9 +518,14 @@ replaces a foreign hook without `--force`, which saves it as
 `<hook>.pre-vigil.bak`. Uninstall removes only marked hooks and restores that
 backup.
 
+Using the [pre-commit](https://pre-commit.com) framework instead? The repository
+ships a `vigil-scan` hook id that runs the same deterministic gate; setup,
+skipping, `autoupdate` and the comparison with `vigil hook install`:
+[docs/pre-commit.md](docs/pre-commit.md).
+
 ### GitHub Actions (PR, `main`, manual)
 
-The same action is listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vigil-security-scan). Use `uses: LevapVeeskela/lv24-vigil@v0.8.0`; add `version: 0.8.0` when the CLI must match the action tag.
+The same action is listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vigil-security-scan). Use `uses: LevapVeeskela/lv24-vigil@v0.9.3`; add `version: 0.9.3` when the CLI must match the action tag.
 
 Copy [`examples/github-workflow.yml`](examples/github-workflow.yml) to
 `.github/workflows/vigil.yml`:
@@ -595,7 +652,7 @@ does not start a scan. Full guide: [docs/ci.md](docs/ci.md) · example:
 
 | Document | Contents |
 | --- | --- |
-| [docs/install.md](docs/install.md) | npm, Go, installers, binaries, container |
+| [docs/install.md](docs/install.md) | npm, Go, installers, deb/rpm/apk, binaries, container |
 | [docs/cli.md](docs/cli.md) | Commands, flags, exit codes, formats |
 | [docs/mcp.md](docs/mcp.md) | MCP clients, tools, resources, prompts |
 | [docs/providers.md](docs/providers.md) | Providers, keys, local models, config precedence |

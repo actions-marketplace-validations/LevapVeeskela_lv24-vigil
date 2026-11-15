@@ -44,6 +44,15 @@ var (
 	pbReqReadGoRe     = regexp.MustCompile(`(?i)\b(?:r\s*\.\s*URL\s*\.\s*Query\s*\(\s*\)\s*\.\s*Get|c\s*\.\s*Query|r\s*\.\s*FormValue|ctx\s*\.\s*Query|r\s*\.\s*Form\s*\.\s*Get)\s*\(\s*["']([^"']+)["']`)
 
 	pbOAuthRedirectGuardRe = regexp.MustCompile(`(?i)allowlist|allowedredirect|allowed|whitelist|isvalidredirect|startswith|equals|in_array|contains|includes`)
+
+	// VGL-AUTH-023: JWT key material taken from the token header (jku/x5u/jwk).
+	// The read must select the field from a decoded token header, and the key
+	// must then be fetched or handed to verify().
+	pbJWTHeaderKeyReadRe = regexp.MustCompile(`(?i)\b(?:header|headers|decoded|tokenheader|token_header|protectedheader|protected_header|payload|claims)\s*(?:\.\s*["']?(?:jku|x5u|jwk)["']?\b|\.\s*get\s*\(\s*["'](?:jku|x5u|jwk)["']|\[\s*["'](?:jku|x5u|jwk)["']\s*\])`)
+	pbJWTKeyFetchRe      = regexp.MustCompile(`(?i)\bfetch\s*\(|\baxios\b|\brequests\s*\.|\bhttp\.Get\b|\burlopen\s*\(|\bhttpx\b|\bgot\s*\(|superagent|\bNet::HTTP\b|\bcurl\b|\bHttpClient\b|\bGet(?:String|FromJson)?Async\s*\(|\bSendAsync\s*\(|\bjwt\s*\.\s*verify\s*\(|\bverify\s*\(\s*token\b`)
+
+	// VGL-AUTH-021: SSH host key verification disabled.
+	pbSSHHostKeyRe = regexp.MustCompile(`(?i)\bAutoAddPolicy\s*\(|\bWarningPolicy\s*\(|\bInsecureIgnoreHostKey\s*\(|\bhostVerifier\s*[:=]\s*(?:\([^)]*\)\s*=>\s*(?:true|\{\s*return\s+true)|function\s*\([^)]*\)\s*\{\s*return\s+true)`)
 )
 
 // pbOAuthRedirectKeys are the redirect parameter names an authorization
@@ -172,6 +181,41 @@ func AuthRules() []Rule {
 			OWASP:       []string{"A01:2021", "A07:2021"},
 			Tags:        []string{"oauth", "redirect"},
 		}, pbOAuthRedirectFromRequestRule),
+
+		New(model.RuleMeta{
+			ID:          "VGL-AUTH-021",
+			Title:       "SSH host key verification disabled",
+			Description: "AutoAddPolicy, WarningPolicy, ssh.InsecureIgnoreHostKey and a hostVerifier that always returns true accept any host key, so a network attacker can impersonate the SSH server and capture credentials. Use RejectPolicy or a known_hosts entry and fail closed on a changed key.",
+			Severity:    model.SeverityHigh,
+			Category:    model.CategoryAuth,
+			Languages:   []string{"python", "go", "javascript", "typescript"},
+			CWE:         []string{"CWE-295"},
+			OWASP:       []string{"A07:2021"},
+			Tags:        []string{"ssh", "host-key", "auth"},
+			References: []string{
+				"https://cwe.mitre.org/data/definitions/295.html",
+				"https://www.paramiko.org/en/stable/api/client.html#paramiko.client.SSHClient.set_missing_host_key_policy",
+				"https://pkg.go.dev/golang.org/x/crypto/ssh#InsecureIgnoreHostKey",
+			},
+		}, pbSSHHostKeyRule),
+
+		New(model.RuleMeta{
+			ID:          "VGL-AUTH-023",
+			Title:       "JWT key material taken from the token header (jku/x5u/jwk)",
+			Description: "RFC 8725 requires the verifier to select the key from a pinned JWKS or secret. Fetching or selecting key material from the attacker-controlled jku, x5u or jwk token header lets anyone sign a token with their own key and have the signature validate.",
+			Severity:    model.SeverityHigh,
+			Category:    model.CategoryAuth,
+			Languages:   []string{"javascript", "typescript", "python", "java", "go", "php", "ruby", "csharp"},
+			CWE:         []string{"CWE-347"},
+			OWASP:       []string{"A02:2021", "A07:2021"},
+			Tags:        []string{"jwt", "key-confusion", "auth"},
+			References: []string{
+				"https://www.rfc-editor.org/rfc/rfc8725.html",
+				"https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html",
+				"https://cwe.mitre.org/data/definitions/347.html",
+				"https://nvd.nist.gov/vuln/detail/CVE-2022-29217",
+			},
+		}, pbJWTHeaderKeyRule),
 	}
 }
 
@@ -1107,6 +1151,119 @@ func pbOAuthRedirectAllowlistWindow(f *File, idx int) bool {
 	}
 	for j := start; j <= idx; j++ {
 		if pbOAuthRedirectGuardRe.MatchString(f.Lines[j]) {
+			return true
+		}
+	}
+	return false
+}
+
+// pbSSHHostKeyRule flags SSH clients that accept any host key. The API names
+// are exact, and .ssh/config files are owned by the config family.
+func pbSSHHostKeyRule(f *File) []model.Finding {
+	if f == nil || pbDocsPath(f.Path) || pbSSHConfigPath(f.Path) {
+		return nil
+	}
+	switch f.Language {
+	case "python", "go", "javascript", "typescript":
+	default:
+		return nil
+	}
+	var out []model.Finding
+	docstrings := PythonDocstringLines(f)
+	for i, line := range f.Lines {
+		if docstrings[i] || pbComment(f, line) {
+			continue
+		}
+		code := StripInlineHashComment(line, f.Language)
+		if !injCodeMatch(pbSSHHostKeyRe, code) {
+			continue
+		}
+		fd := pbFinding(f, i+1, line)
+		fd.Severity = pbSev(f, model.SeverityHigh)
+		fd.Confidence = model.ConfidenceHigh
+		out = append(out, fd)
+	}
+	return out
+}
+
+// pbSSHConfigPath reports whether path is an OpenSSH client or server config
+// file; those are handled by the configuration rules, not by code rules.
+func pbSSHConfigPath(path string) bool {
+	p := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	return strings.HasSuffix(p, ".ssh/config") || strings.Contains(p, "/.ssh/ssh_config") ||
+		strings.HasSuffix(p, "/ssh_config") || strings.HasSuffix(p, "/sshd_config")
+}
+
+// ---------------------------------------------------------------------------
+// VGL-AUTH-023 — JWT key material taken from the token header (jku/x5u/jwk)
+// ---------------------------------------------------------------------------
+
+// pbJWTHeaderKeyRule flags a verifier that fetches or selects its key from the
+// jku/x5u/jwk field of a decoded token header. Setting those fields on an
+// outgoing token and reading a configured JWKS URL are both safe. Python
+// docstrings are documentation, not a verifier, and are skipped.
+func pbJWTHeaderKeyRule(f *File) []model.Finding {
+	if f == nil || pbDocsPath(f.Path) || !pbJWTLanguage(f.Language) {
+		return nil
+	}
+	if isTestPath(strings.ToLower(strings.ReplaceAll(f.Path, "\\", "/"))) {
+		return nil
+	}
+	docstrings := PythonDocstringLines(f)
+	var out []model.Finding
+	for i, line := range f.Lines {
+		if docstrings[i] || pbComment(f, line) || !pbJWTHeaderKeyReadRe.MatchString(line) {
+			continue
+		}
+		// `jwt.sign(..., { header: { jku: ... } })` advertises a key; it does
+		// not choose the verification key.
+		if pbIsJWTSignLine(line) && !pbJWTKeyFetchRe.MatchString(line) {
+			continue
+		}
+		if !pbJWTKeyFetchNear(f, i, docstrings) {
+			continue
+		}
+		fd := pbFinding(f, i+1, line)
+		fd.Severity = pbSev(f, model.SeverityHigh)
+		fd.Confidence = model.ConfidenceMedium
+		out = append(out, fd)
+	}
+	return out
+}
+
+// pbJWTLanguage reports whether the language has JWT libraries this rule knows.
+func pbJWTLanguage(lang string) bool {
+	switch lang {
+	case "javascript", "typescript", "python", "java", "go", "php", "ruby", "csharp":
+		return true
+	default:
+		return false
+	}
+}
+
+// pbIsJWTSignLine reports whether the line is a JWT signing call.
+func pbIsJWTSignLine(line string) bool {
+	lower := strings.ToLower(line)
+	return strings.Contains(lower, "jwt.sign(") || strings.Contains(lower, ".sign(")
+}
+
+// pbJWTKeyFetchNear reports whether the key selected from the header is fetched
+// or passed to verify() on the same line or within the next five lines.
+// Docstring lines are prose and cannot fetch anything.
+func pbJWTKeyFetchNear(f *File, idx int, docstrings map[int]bool) bool {
+	end := idx + 5
+	if end >= len(f.Lines) {
+		end = len(f.Lines) - 1
+	}
+	for j := idx; j <= end; j++ {
+		if docstrings[j] {
+			continue
+		}
+		line := f.Lines[j]
+		if pbComment(f, line) {
+			continue
+		}
+		if pbJWTKeyFetchRe.MatchString(line) {
 			return true
 		}
 	}

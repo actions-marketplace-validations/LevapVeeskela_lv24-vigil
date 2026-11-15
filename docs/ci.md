@@ -8,7 +8,7 @@ locally and in CI:
 vigil scan . --no-llm --format sarif --output vigil.sarif --fail-on high
 ```
 
-`--no-llm` runs all 221 rules with no model, no key and no network. `--fail-on`
+`--no-llm` runs all 263 rules with no model, no key and no network. `--fail-on`
 changes the exit code, not the report: the SARIF file is written before the
 process exits `2`, so an upload step with `if: always()` still runs.
 
@@ -17,6 +17,7 @@ process exits `2`, so an upload step with `if: always()` still runs.
 | Where you work | Use | Template |
 | --- | --- | --- |
 | Local clone | `vigil hook install` | built in |
+| Local clone using pre-commit | framework hook `vigil-scan` | [pre-commit.md](pre-commit.md) |
 | GitHub | Actions on PR, `main` and manual dispatch | [`examples/github-workflow.yml`](../examples/github-workflow.yml) |
 | GitLab | MR, default branch and manual web run | [`examples/gitlab-ci.yml`](../examples/gitlab-ci.yml) |
 | Any runner | CLI + SARIF artifact | this document |
@@ -35,7 +36,7 @@ What the generated hook does:
 
 | Mode | Command |
 | --- | --- |
-| `pre-commit` | `vigil scan --changed --base HEAD --no-llm --fail-on high --quiet` |
+| `pre-commit` | `git diff --cached --unified=0 --no-color \| vigil scan --diff - --no-llm --fail-on high --quiet`; skipped when the index is empty |
 | `pre-push` | `vigil scan --changed --base @{upstream} --no-llm --fail-on high --quiet`; falls back to `HEAD~1`, then `HEAD` on a single-commit branch |
 
 The file starts with `#!/bin/sh`, is executable, and contains the exact marker
@@ -53,6 +54,27 @@ The file starts with `#!/bin/sh`, is executable, and contains the exact marker
 
 `vigil hook status` prints every installed hook, its marker and the exact target
 command. `--fail-on low|medium|high|critical` is available on install.
+
+## pre-commit framework
+
+Repositories that already use [pre-commit](https://pre-commit.com) can enable the
+published hook instead of the native one:
+
+```yaml
+repos:
+  - repo: https://github.com/LevapVeeskela/lv24-vigil
+    rev: v0.9.3
+    hooks:
+      - id: vigil-scan
+```
+
+`vigil-scan` runs `vigil scan --no-llm --fail-on high` with
+`pass_filenames: false`, so it scans the project rather than the staged file
+list; `vigil-mcp-audit` is an opt-in second hook for repositories that commit MCP
+configuration. The CLI must already be on `PATH` (`language: system`), and
+pre-commit.ci cannot run it — keep the gate in a workflow there. Install, skip,
+`autoupdate`, exit code `2` and the comparison with `vigil hook install`:
+[pre-commit.md](pre-commit.md).
 
 ## GitHub Actions
 
@@ -176,21 +198,21 @@ vigil:
 runners should call `actions/setup-node` first.
 
 The action is listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vigil-security-scan)
-as **Vigil security scan** (Security + Code quality). Pin `version: 0.8.0` when
-the CLI must match the action tag; the default `latest` follows the newest npm
-release.
+as **Vigil security scan** (Security + Code quality). Pin `version: 0.9.3` when
+the CLI must match the action tag; when omitted, the action installs its own
+release version, not npm `latest`.
 
 ```yaml
 - uses: actions/checkout@v7
 
 - id: vigil
-  uses: LevapVeeskela/lv24-vigil@v0.8.0
+  uses: LevapVeeskela/lv24-vigil@v0.9.3
   with:
     path: .
     fail-on: high
     no-llm: true
     format: sarif
-    version: 0.8.0
+    version: 0.9.3
 
 - if: always()
   uses: github/codeql-action/upload-sarif@v4
@@ -225,6 +247,19 @@ vigil scan . --no-llm --format sarif --output vigil.sarif --fail-on high
 Keep the report as an artifact with `when: always` / `if: always()` so reviewers
 can see why the job failed. Do not run `vigil fix --apply` in CI: fixes are a
 developer action.
+
+## SBOM artifact
+
+A bill of materials can be published next to the SARIF file:
+
+```bash
+vigil sbom . --format cyclonedx --output vigil.cdx.json
+```
+
+The command is offline and reads the same manifests and lockfiles as the OSV
+scanner. CycloneDX 1.6 is the default; `--format spdx` emits SPDX 2.3. Add
+development dependencies with `--include-dev`. Keep the file as a build artifact,
+or feed it to a separate scanner; Vigil does not upload it anywhere.
 
 ## Exit codes
 

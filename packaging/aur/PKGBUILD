@@ -1,0 +1,52 @@
+# Maintainer: LevapVeeskela <paulalexeev10@gmail.com>
+# Contributor: Vigil maintainers
+#
+# vigil-bin installs the prebuilt upstream release binary. There is no build
+# step: package() copies the binary and the license into $pkgdir.
+#
+# Checksums below are the published v0.9.3 values. Refresh all three from
+# checksums.txt and the LICENSE file for every new release:
+#
+#   curl -fsSLO https://github.com/LevapVeeskela/lv24-vigil/releases/download/v0.9.3/checksums.txt
+#   grep -E 'vigil_0\.9\.3_linux_(amd64|arm64)$' checksums.txt
+#   sha256sum LICENSE   # https://raw.githubusercontent.com/LevapVeeskela/lv24-vigil/v0.9.3/LICENSE
+#
+# Then verify the sources and build:
+#
+#   makepkg --verifysource && makepkg -si
+#
+
+pkgname=vigil-bin
+pkgver=0.9.3
+pkgrel=1
+pkgdesc="Local-first security auditor with 263 deterministic rules and an MCP server"
+arch=('x86_64' 'aarch64')
+url="https://github.com/LevapVeeskela/lv24-vigil"
+license=('Apache-2.0')
+provides=('vigil')
+conflicts=('vigil')
+options=('!strip') # upstream binary is prebuilt and statically linked
+
+_baseurl="${url}/releases/download/v${pkgver}"
+
+source=("LICENSE::${url}/raw/v${pkgver}/LICENSE")
+source_x86_64=("vigil_${pkgver}_linux_amd64::${_baseurl}/vigil_${pkgver}_linux_amd64")
+source_aarch64=("vigil_${pkgver}_linux_arm64::${_baseurl}/vigil_${pkgver}_linux_arm64")
+
+sha256sums=('46601daebe32a15c144660cf135cfa3b610459085b7118c2d499f4f8b6f2ce61')
+sha256sums_x86_64=('0c2ad3d2ca632780ff2142bc28231b1edfd004d8e3d0cfe2d8f8a45c2bc24868')
+sha256sums_aarch64=('6b1587de4c44892836c78791081a35a555888de8a4baf91fdd1af800a257ae86')
+
+package() {
+  local asset_arch
+  case "$CARCH" in
+    x86_64) asset_arch=amd64 ;;
+    aarch64) asset_arch=arm64 ;;
+    *) echo "unsupported architecture: $CARCH" >&2; return 1 ;;
+  esac
+
+  install -Dm755 "${srcdir}/vigil_${pkgver}_linux_${asset_arch}" \
+    "${pkgdir}/usr/bin/vigil"
+  install -Dm644 "${srcdir}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
