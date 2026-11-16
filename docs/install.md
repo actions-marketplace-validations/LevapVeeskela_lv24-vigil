@@ -7,7 +7,7 @@ for a normal scan.
 ## npm
 
 ```bash
-npm i -g lv24-vigil@latest     # or pin a release: lv24-vigil@0.9.3
+npm i -g lv24-vigil@latest     # or pin a release: lv24-vigil@0.10.0
 vigil version
 ```
 
@@ -19,7 +19,7 @@ platform package, and `vigil` then exits with `platform package ... is not
 installed`.
 
 Releases are published from GitHub Actions with npm Trusted Publishing (OIDC).
-`0.9.3` is the current version on the `latest` tag. Pipeline, verification and
+`0.10.0` is the current version on the `latest` tag. Pipeline, verification and
 re-run steps: [release.md](release.md).
 
 For a one-off run without a global install:
@@ -101,12 +101,12 @@ vigil-<version>-linux-amd64.apk   vigil-<version>-linux-arm64.apk
 ```
 
 Download the file for your distribution from the release page and install it
-with the local path (`0.9.3`, `amd64` shown):
+with the local path (`0.10.0`, `amd64` shown):
 
 ```bash
-sudo apt install ./vigil-0.9.3-linux-amd64.deb                # Debian, Ubuntu
-sudo dnf install --nogpgcheck ./vigil-0.9.3-linux-amd64.rpm   # Fedora, RHEL, openSUSE
-sudo apk add --allow-untrusted ./vigil-0.9.3-linux-amd64.apk  # Alpine
+sudo apt install ./vigil-0.10.0-linux-amd64.deb                # Debian, Ubuntu
+sudo dnf install --nogpgcheck ./vigil-0.10.0-linux-amd64.rpm   # Fedora, RHEL, openSUSE
+sudo apk add --allow-untrusted ./vigil-0.10.0-linux-amd64.apk  # Alpine
 vigil version
 ```
 
@@ -118,10 +118,29 @@ no distribution key of their own, which is why `dnf` needs `--nogpgcheck` and
 lists the packages and is signed with cosign keyless:
 [release.md](release.md#verify-a-release).
 
+## Scoop (Windows)
+
+```powershell
+scoop bucket add lv24 https://github.com/LevapVeeskela/scoop-bucket
+scoop install lv24/vigil
+```
+
+The manifest tracks releases through `checkver` and `autoupdate`.
+
+## Homebrew (macOS and Linux)
+
+```bash
+brew install LevapVeeskela/tap/vigil
+```
+
+The tap builds from the tagged source tarball and runs `vigil version` as its
+test.
+
 ## AUR (Arch Linux)
 
-The AUR package `vigil-bin` installs the published release binary instead of
-building from source:
+AUR registration is temporarily paused, so `vigil-bin` is not published yet.
+The PKGBUILD in this repository is ready for 0.10.0. After the package appears on
+AUR it installs the release binary instead of building from source:
 
 ```bash
 yay -S vigil-bin          # or: paru -S vigil-bin
@@ -160,19 +179,19 @@ Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to
 GitHub Container Registry with every release:
 
 ```bash
-docker pull ghcr.io/levapveeskela/lv24-vigil:0.9.3
+docker pull ghcr.io/levapveeskela/lv24-vigil:0.10.0
 docker run --rm -v "$PWD:/workspace" \
-  ghcr.io/levapveeskela/lv24-vigil:0.9.3 scan --no-llm --path /workspace
+  ghcr.io/levapveeskela/lv24-vigil:0.10.0 scan --no-llm --path /workspace
 ```
 
 The image is distroless (`gcr.io/distroless/static-debian12:nonroot`): no shell,
 no package manager, entrypoint `vigil`, user `nonroot:nonroot`, working directory
-`/workspace`. Tags are `<version>` (`0.9.3`), `<major>.<minor>` (`0.9`), `latest`
+`/workspace`. Tags are `<version>` (`0.10.0`), `<major>.<minor>` (`0.10`), `latest`
 (non-prerelease only) and `sha-<commit>`. A tag can move; pin the manifest-list
 digest in CI:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/levapveeskela/lv24-vigil:0.9.3 \
+docker buildx imagetools inspect ghcr.io/levapveeskela/lv24-vigil:0.10.0 \
   --format '{{json .Manifest}}' | jq -r .digest
 
 docker run --rm -v "$PWD:/workspace" \
@@ -239,7 +258,10 @@ clients: [mcp.md](mcp.md). CI: [ci.md](ci.md). Local hooks, including the
 - standalone: download the new binary and replace the old one
 - Debian/Ubuntu, Fedora/RHEL/openSUSE, Alpine: install the new `.deb`/`.rpm`/
   `.apk` asset; the package replaces the previous one
-- Arch Linux (AUR): `yay -Syu vigil-bin` once the PKGBUILD version is bumped
+- Scoop: `scoop update vigil`
+- Homebrew: `brew upgrade vigil`
+- Arch Linux (AUR): `yay -Syu vigil-bin` after the package is published and
+  the PKGBUILD version is bumped
 - container: `docker pull ghcr.io/levapveeskela/lv24-vigil:<new-version>`, or
   rebuild the local image
 
