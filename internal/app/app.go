@@ -48,12 +48,32 @@ type App struct {
 	NoInlineSuppressions bool
 }
 
+// Option customises App construction.
+type Option func(*options)
+
+type options struct {
+	offline bool
+}
+
+// WithOffline disables every network client: the model is not constructed and
+// OSV lookups are forced off, including a configured OSV base URL. The
+// deterministic rules still run.
+func WithOffline() Option {
+	return func(o *options) { o.offline = true }
+}
+
 // New resolves root, loads configuration and builds every component. An LLM
 // that is configured but unreachable is a warning, not an error: deterministic
 // scanning must keep working.
-func New(root string, logger *slog.Logger) (*App, error) {
+func New(root string, logger *slog.Logger, opts ...Option) (*App, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	var o options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
 	}
 	abs, err := ResolveRoot(root)
 	if err != nil {
@@ -62,6 +82,9 @@ func New(root string, logger *slog.Logger) (*App, error) {
 	cfg, err := config.Load(abs)
 	if err != nil {
 		return nil, err
+	}
+	if o.offline {
+		disableNetwork(&cfg)
 	}
 	reg := rules.Default()
 	sc := scanner.New(reg, logger)
@@ -79,6 +102,9 @@ func New(root string, logger *slog.Logger) (*App, error) {
 		Logger:   logger,
 	}
 	a.Analyzer = analysis.New(cfg, nil, logger)
+	if o.offline {
+		a.Warnings = append(a.Warnings, "offline mode: model and OSV network access are disabled")
+	}
 
 	if cfg.LLMEnabled() {
 		client, err := llm.New(cfg, logger)
@@ -98,6 +124,21 @@ func New(root string, logger *slog.Logger) (*App, error) {
 		}
 	}
 	return a, nil
+}
+
+// disableNetwork clears every setting that could start a model client or an OSV
+// request. It is applied before the analyzer is built, so offline is a
+// construction-time guarantee rather than a per-call check.
+func disableNetwork(cfg *config.Config) {
+	cfg.Provider = ""
+	cfg.Model = ""
+	cfg.BaseURL = ""
+	cfg.APIKey = ""
+	cfg.Command = nil
+	cfg.Scan.OSV = false
+	cfg.Scan.OSVBaseURL = ""
+	use := false
+	cfg.Scan.UseLLM = &use
 }
 
 // ResolveRoot turns root into an absolute, existing directory. A file path is
@@ -189,6 +230,9 @@ func (a *App) Scan(ctx context.Context, req model.ScanRequest) (*model.ScanResul
 	res.Model = a.Model
 
 	if opts.OSV {
+		// Record the attempt before the call: coverage must say that a network
+		// channel was used even when the lookup itself fails.
+		res.Stats.OSVQueried = true
 		osvOpts := osv.DefaultOptions()
 		if a.Config.Scan.OSVBaseURL != "" {
 			osvOpts.BaseURL = a.Config.Scan.OSVBaseURL
@@ -218,6 +262,7 @@ func (a *App) Scan(ctx context.Context, req model.ScanRequest) (*model.ScanResul
 
 		deep := req.DeepReview || a.Config.Scan.DeepReview || opts.Mode == "deep"
 		if deep {
+			res.Stats.LLMCalls++
 			files, ferr := a.Scanner.CollectFiles(ctx, opts)
 			if ferr != nil {
 				res.Errors = append(res.Errors, "collect files for deep review: "+ferr.Error())
@@ -231,6 +276,7 @@ func (a *App) Scan(ctx context.Context, req model.ScanRequest) (*model.ScanResul
 		}
 
 		if req.ThreatModel {
+			res.Stats.LLMCalls++
 			tm, terr := a.Analyzer.ThreatModel(ctx, opts.Root)
 			if terr != nil {
 				res.Errors = append(res.Errors, "llm threat model: "+terr.Error())
@@ -244,9 +290,13 @@ func (a *App) Scan(ctx context.Context, req model.ScanRequest) (*model.ScanResul
 	// sort and cap once more before the result is stored. The sort comes first:
 	// the cap must drop the least severe findings, not whatever was appended
 	// last, or a critical advisory could fall behind the cap and a --fail-on
-	// gate would pass.
+	// gate would pass. The pool is counted before that cap so paginated
+	// callers can state an honest total.
 	res.Findings = model.Filter(res.Findings, opts.MinSeverity, 0)
 	model.SortFindings(res.Findings)
+	if pool := len(res.Findings); pool > res.Stats.FindingsTotal {
+		res.Stats.FindingsTotal = pool
+	}
 	if opts.MaxFindings > 0 && len(res.Findings) > opts.MaxFindings {
 		res.Stats.Truncated += len(res.Findings) - opts.MaxFindings
 		res.Findings = res.Findings[:opts.MaxFindings]

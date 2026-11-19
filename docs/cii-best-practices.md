@@ -52,7 +52,7 @@ PyPI launcher, GitHub binaries, deb/rpm/apk, Homebrew, Scoop, GHCR).
 | HTTPS | All project, documentation, package and API endpoints use HTTPS | repository links |
 | English | Documentation, CLI output and reports are in English | repository |
 | Signed releases | Keyless cosign signature over `checksums.txt`; GitHub build provenance attestations for every release asset; BuildKit provenance and SBOM for the container image | [`docs/release.md`](release.md#verify-a-release) |
-| SBOM | CycloneDX 1.6 release asset (SPDX 2.3 also supported); generated offline by `vigil sbom` | `vigil-sbom-0.10.3.cdx.json` |
+| SBOM | CycloneDX 1.6 release asset (SPDX 2.3 also supported); generated offline by `vigil sbom` | `vigil-sbom-0.11.0.cdx.json` |
 | Provenance | GitHub-native attestations name the workflow, commit and digest; `gh attestation verify` fails on a rebuilt or altered file | [`docs/release.md`](release.md) |
 
 ## Release integrity answers in detail
@@ -64,24 +64,24 @@ packages. It is signed with cosign in keyless mode; the bundle is
 Each file in the release also has a GitHub build provenance attestation.
 
 ```bash
-gh release download v0.10.3 --pattern checksums.txt --pattern checksums.txt.sigstore.json
+gh release download v0.11.0 --pattern checksums.txt --pattern checksums.txt.sigstore.json
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
-  --certificate-identity "https://github.com/LevapVeeskela/lv24-vigil/.github/workflows/release.yml@refs/tags/v0.10.3" \
+  --certificate-identity "https://github.com/LevapVeeskela/lv24-vigil/.github/workflows/release.yml@refs/tags/v0.11.0" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 
-gh attestation verify vigil_0.10.3_linux_amd64 --repo LevapVeeskela/lv24-vigil
+gh attestation verify vigil_0.11.0_linux_amd64 --repo LevapVeeskela/lv24-vigil
 ```
 
 **SBOM.** Generate and inspect it locally:
 
 ```bash
-vigil sbom . --format cyclonedx --output vigil-sbom-0.10.3.cdx.json
-vigil sbom . --format spdx --output vigil-sbom-0.10.3.spdx.json
+vigil sbom . --format cyclonedx --output vigil-sbom-0.11.0.cdx.json
+vigil sbom . --format spdx --output vigil-sbom-0.11.0.spdx.json
 ```
 
-The release publishes `vigil-sbom-0.10.3.cdx.json`. It inventories declared
+The release publishes `vigil-sbom-0.11.0.cdx.json`. It inventories declared
 dependencies; it does not resolve version ranges or prove the absence of
 vulnerabilities.
 
@@ -95,7 +95,8 @@ date and credit unless the reporter asks to stay anonymous.
 
 **Security design.** Deterministic scans are local and make no network calls;
 LLM context goes only to the configured endpoint; scans are read-only by default;
-only `vigil_fix` with `apply=true` writes source files and it never commits.
+only `vigil_fix` with `mode=apply` writes source files, and it applies only a
+reviewed proposal (`fixId` + `diffSha256`) and never commits.
 See [`docs/security-model.md`](security-model.md).
 
 ## Gaps to close before applying

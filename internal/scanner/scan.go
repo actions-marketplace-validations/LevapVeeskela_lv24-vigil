@@ -91,23 +91,30 @@ func (s *Scanner) Scan(ctx context.Context, opts Options) (*model.ScanResult, er
 
 	switch {
 	case strings.TrimSpace(opts.Diff) != "":
-		files, skipped, errs, err := buildDiffFiles(ctx, root, opts)
+		files, skipped, reasons, errs, err := buildDiffFiles(ctx, root, opts)
 		if err != nil {
 			return nil, err
 		}
-		return s.scanFiles(ctx, files, opts, skipped, errs, started)
+		return s.scanFiles(ctx, files, opts, skipped, reasons, errs, started)
 	case opts.ChangedOnly:
 		paths, err := gitutil.ChangedFiles(ctx, root, opts.BaseRef)
 		if err != nil {
 			return nil, err
 		}
-		return s.ScanPaths(ctx, root, filterChangedPaths(paths, opts), opts)
+		filtered, skipped, reasons := filterChangedPaths(paths, opts)
+		res, err := s.ScanPaths(ctx, root, filtered, opts)
+		if err != nil {
+			return nil, err
+		}
+		res.Stats.FilesSkipped += skipped
+		res.Stats.SkippedReasons = mergeReasons(res.Stats.SkippedReasons, reasons)
+		return res, nil
 	default:
 		walked, err := walkFiles(ctx, root, opts)
 		if err != nil {
 			return nil, err
 		}
-		return s.scanFiles(ctx, walked.files, opts, walked.skipped, walked.errs, started)
+		return s.scanFiles(ctx, walked.files, opts, walked.skipped, walked.reasons, walked.errs, started)
 	}
 }
 
@@ -120,7 +127,7 @@ func (s *Scanner) ScanFiles(ctx context.Context, files []*rules.File, opts Optio
 			opts.Root = filepath.Clean(abs)
 		}
 	}
-	return s.scanFiles(ctx, files, opts, 0, nil, started)
+	return s.scanFiles(ctx, files, opts, 0, nil, nil, started)
 }
 
 // ScanPaths scans exactly the given paths, relative to root (absolute paths
@@ -139,6 +146,7 @@ func (s *Scanner) ScanPaths(ctx context.Context, root string, paths []string, op
 	var (
 		files   []*rules.File
 		skipped int
+		reasons map[string]int
 		errs    []string
 	)
 	seen := make(map[string]bool, len(paths))
@@ -149,16 +157,20 @@ func (s *Scanner) ScanPaths(ctx context.Context, root string, paths []string, op
 		absPath, relPath, ok := resolveInput(rootAbs, p)
 		if !ok {
 			skipped++
+			reasons = countSkip(reasons, skipReasonOutsideRoot)
 			errs = append(errs, fmt.Sprintf("skip %q: outside scan root", p))
 			continue
 		}
 		if seen[relPath] {
+			skipped++
+			reasons = countSkip(reasons, skipReasonDuplicate)
 			continue
 		}
 		seen[relPath] = true
 		f, err := loadFile(absPath, relPath, maxBytes, opts.FollowLinks)
 		if err != nil {
 			skipped++
+			reasons = countSkip(reasons, skipReasonForErr(err))
 			if !isSkipError(err) && !errors.Is(err, os.ErrNotExist) {
 				errs = append(errs, fmt.Sprintf("read %s: %v", relPath, err))
 			}
@@ -166,15 +178,16 @@ func (s *Scanner) ScanPaths(ctx context.Context, root string, paths []string, op
 		}
 		files = append(files, f)
 	}
-	return s.scanFiles(ctx, files, opts, skipped, errs, started)
+	return s.scanFiles(ctx, files, opts, skipped, reasons, errs, started)
 }
 
-func (s *Scanner) scanFiles(ctx context.Context, input []*rules.File, opts Options, skipped int, initialErrors []string, started time.Time) (*model.ScanResult, error) {
+func (s *Scanner) scanFiles(ctx context.Context, input []*rules.File, opts Options, skipped int, reasons map[string]int, initialErrors []string, started time.Time) (*model.ScanResult, error) {
 	if started.IsZero() {
 		started = time.Now().UTC()
 	}
-	files, prepSkipped := prepareInputFiles(input)
+	files, prepSkipped, prepReasons := prepareInputFiles(input)
 	skipped += prepSkipped
+	reasons = mergeReasons(reasons, prepReasons)
 
 	selected := s.selectedRules(opts)
 	res := &model.ScanResult{
@@ -188,6 +201,11 @@ func (s *Scanner) scanFiles(ctx context.Context, input []*rules.File, opts Optio
 
 	res.Stats.FilesScanned = len(files)
 	res.Stats.FilesSkipped = skipped
+	// Reasons are only present when something was skipped; FilesSkipped is
+	// their sum.
+	if len(reasons) > 0 {
+		res.Stats.SkippedReasons = reasons
+	}
 	res.Stats.RulesRun = len(selected)
 	for _, f := range files {
 		res.Stats.BytesScanned += int64(len(f.Content))
@@ -222,6 +240,9 @@ func (s *Scanner) scanFiles(ctx context.Context, input []*rules.File, opts Optio
 
 	model.SortFindings(kept)
 	model.SortFindings(suppressed)
+	// Record the pool size before the per-request cap: paginated callers need
+	// an honest total for findings this response does not contain.
+	res.Stats.FindingsTotal = len(kept)
 	if opts.MaxFindings > 0 && len(kept) > opts.MaxFindings {
 		res.Stats.Truncated += len(kept) - opts.MaxFindings
 		kept = kept[:opts.MaxFindings]
@@ -253,18 +274,30 @@ func (s *Scanner) scanFiles(ctx context.Context, input []*rules.File, opts Optio
 // filterChangedPaths applies the same hard-skip directories and include/exclude
 // patterns as a normal walk. Changed mode gets its paths from git, so without
 // this a repository's own .vigil history, node_modules or generated bundles
-// would be scanned as if they were source.
-func filterChangedPaths(paths []string, opts Options) []string {
+// would be scanned as if they were source. It returns the kept paths plus the
+// skipped count and reasons, so coverage cannot silently omit changed files.
+func filterChangedPaths(paths []string, opts Options) ([]string, int, map[string]int) {
 	excludes := append(defaultExcludePatterns(), opts.Exclude...)
 	matcher := newIgnoreMatcher(excludes, opts.Include)
 	out := make([]string, 0, len(paths))
+	skipped := 0
+	var reasons map[string]int
 	for _, p := range paths {
-		if hasHardSkipSegment(p) || matcher.ignored(p, false) || !matcher.included(p) {
-			continue
+		switch {
+		case hasHardSkipSegment(p):
+			skipped++
+			reasons = countSkip(reasons, skipReasonToolState)
+		case matcher.ignored(p, false):
+			skipped++
+			reasons = countSkip(reasons, skipReasonIgnored)
+		case !matcher.included(p):
+			skipped++
+			reasons = countSkip(reasons, skipReasonNotIncluded)
+		default:
+			out = append(out, p)
 		}
-		out = append(out, p)
 	}
-	return out
+	return out, skipped, reasons
 }
 
 func (s *Scanner) selectedRules(opts Options) []rules.Rule {
@@ -372,15 +405,26 @@ func safeCheck(rule rules.Rule, f *rules.File) (findings []model.Finding, err er
 	return rule.Check(f), nil
 }
 
-func prepareInputFiles(input []*rules.File) ([]*rules.File, int) {
+func prepareInputFiles(input []*rules.File) ([]*rules.File, int, map[string]int) {
 	out := make([]*rules.File, 0, len(input))
+	var reasons map[string]int
 	skipped := 0
+	seen := make(map[string]bool, len(input))
 	for _, f := range input {
 		if f == nil {
 			skipped++
+			reasons = countSkip(reasons, skipReasonMissing)
 			continue
 		}
 		f.Path = filepath.ToSlash(f.Path)
+		if f.Path != "" {
+			if seen[f.Path] {
+				skipped++
+				reasons = countSkip(reasons, skipReasonDuplicate)
+				continue
+			}
+			seen[f.Path] = true
+		}
 		if f.Content == nil && f.Lines != nil {
 			f.Content = []byte(strings.Join(f.Lines, "\n"))
 		}
@@ -396,7 +440,7 @@ func prepareInputFiles(input []*rules.File) ([]*rules.File, int) {
 		f.Size = len(f.Content)
 		out = append(out, f)
 	}
-	return out, skipped
+	return out, skipped, reasons
 }
 
 // redactDetectedSecrets masks credentials in the evidence and snippet of every

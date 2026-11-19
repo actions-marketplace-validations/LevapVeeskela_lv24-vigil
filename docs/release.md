@@ -38,7 +38,7 @@ generated from the tag.
    gh release create     ->  GitHub release (notes generated, prerelease if the tag has "-")
       |
       v
- npm-publish.yml (reusable workflow, needs: release)
+ npm-publish.yml (workflow_run after release)
    gh release download   ->  release-assets/
    node npm/build.mjs    ->  verify every SHA-256, write 7 packages
    bash npm/publish.sh   ->  OIDC publish: 6 platform packages, then lv24-vigil
@@ -57,10 +57,11 @@ generated from the tag.
 | Package build | `npm-publish.yml` | `npm/build.mjs` verifies each binary against `checksums.txt` and writes nothing unless all six match |
 | npm publish | `npm-publish.yml` | Platform packages first, then the launcher; versions already on npm are skipped |
 
-npm is a separate job on purpose. It `needs` the GitHub release, so the binaries
-exist before packaging starts, and the publish step is `continue-on-error`, so a
-failed npm publish leaves the release published and green. The job ends with a
-warning that names the missing setup; re-run it after fixing the cause.
+npm is a separate workflow on purpose. It triggers on the completed release
+workflow (`workflow_run`), waits for a successful release, downloads the
+published assets, and its publish step is `continue-on-error`, so a failed npm
+publish leaves the release published and green. The job ends with a warning that
+names the missing setup; re-run the workflow after fixing the cause.
 
 Two more workflows run around a tag. [`container.yml`](../.github/workflows/container.yml)
 builds the multi-arch image (`linux/amd64`, `linux/arm64`) from the repository
@@ -70,9 +71,9 @@ dispatched for an existing tag. [`scorecard.yml`](../.github/workflows/scorecard
 re-runs OpenSSF Scorecard on `main`, weekly and on branch-protection changes, and
 uploads the SARIF result to code scanning.
 
-`npm-publish.yml` is both a reusable workflow (called by `release.yml`) and a
-`workflow_dispatch` workflow, so it can publish an existing tag on demand.
-`release.yml` triggers on any `v*` tag; `npm-publish.yml` accepts only
+`npm-publish.yml` runs as a separate `workflow_run` workflow after a successful
+release (and on `workflow_dispatch`), so it can publish an existing tag on
+demand. `release.yml` triggers on any `v*` tag; `npm-publish.yml` accepts only
 `v<major>.<minor>.<patch>` with an optional `-prerelease` suffix. `ci.yml` runs a
 GoReleaser snapshot and an npm package dry run on pull requests, so asset naming
 and package layout mistakes fail before a tag is cut.
@@ -172,8 +173,8 @@ npm trust github @lv24/vigil-linux-arm64 --file npm-publish.yml --repo LevapVees
 ```
 
 - `--file` is the workflow file that contains the publishing job, not the tag
-  workflow. That is `npm-publish.yml`: `release.yml` calls it as a reusable
-  workflow, and the OIDC claim is issued for the called workflow.
+  workflow. That is `npm-publish.yml`: it runs separately after `release.yml`
+  completes, and the OIDC claim is issued for that workflow.
 - `--allow-publish` permits `npm publish` from that workflow; `-y` skips the
   confirmation prompt.
 - A `409` response means the trusted publisher is already configured. Nothing to
@@ -186,8 +187,8 @@ refuses an older npm). Use the same or newer npm for the `npm trust` commands.
 
 ## Verify a release
 
-`v0.10.3` ships the same 16 assets as `v0.10.2`: six static binaries, six Linux
-packages (deb/rpm/apk × amd64/arm64), `vigil-sbom-0.10.3.cdx.json`,
+`v0.11.0` ships 16 assets: six static binaries, six Linux
+packages (deb/rpm/apk × amd64/arm64), `vigil-sbom-0.11.0.cdx.json`,
 `checksums.txt` and its cosign bundle, the provenance bundle
 (`provenance.intoto.jsonl`), and the GHCR image for both architectures. Download what you need from the release page;
 the commands below verify it without trusting the download.
@@ -231,17 +232,17 @@ signature. Compare its digest with the `container` run summary, or inspect the
 attestations directly:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/levapveeskela/lv24-vigil:0.10.3 \
+docker buildx imagetools inspect ghcr.io/levapveeskela/lv24-vigil:0.11.0 \
   --format '{{json .Manifest}}' | jq -r .digest
 ```
 
 Installed CLI:
 
 ```bash
-npm view lv24-vigil version          # 0.10.3
-npm view lv24-vigil dist-tags        # { latest: '0.10.3' }
-npm i -g lv24-vigil@0.10.3            # or @latest
-vigil version                        # vigil 0.10.3 (<commit>, <date>, go<version>)
+npm view lv24-vigil version          # 0.11.0
+npm view lv24-vigil dist-tags        # { latest: '0.11.0' }
+npm i -g lv24-vigil@0.11.0            # or @latest
+vigil version                        # vigil 0.11.0 (<commit>, <date>, go<version>)
 ```
 
 Platform packages, one line each:
@@ -279,8 +280,10 @@ shows the matching provenance badge.
 
 A published tag never moves and is never deleted: `v0.2.0` and later are Go
 module versions, and `0.5.0`+ also name the binaries, npm packages and PyPI
-artifacts that users install. A fix that lands after a tag lives on `main`;
-`main` is the canonical documentation copy, and GitHub serves it by default.
+artifacts that users install. This is a release policy, not a GitHub-enforced
+tag ruleset: verify a tag with `git rev-parse vX.Y.Z` before trusting it. A fix
+that lands after a tag lives on `main`; `main` is the canonical documentation
+copy, and GitHub serves it by default.
 
 Cut a patch release when a **shipped artifact** changes, or when a **shipped
 example that users copy** is wrong:
@@ -479,7 +482,7 @@ reasoning and the procedure if a rewrite is ever required are in
 
 - **No long-lived npm token in CI.** No `NPM_TOKEN` secret is configured in the
   repository (`gh secret list` returns nothing); the publish job exchanges its
-  OIDC token for a short-lived credential. `release.yml` still accepts an
+  OIDC token for a short-lived credential. `npm-publish.yml` still accepts an
   `NPM_TOKEN` secret as a manual fallback, and `npm/publish.sh` prefers it when
   set — leave it unset.
 - **Trust is bound to the repository and the workflow file.** A trusted
@@ -496,10 +499,9 @@ reasoning and the procedure if a rewrite is ever required are in
   verify <file> --repo LevapVeeskela/lv24-vigil` checks the digest against that
   run.
 - **Minimal token scope.** `id-token: write` is granted to the publish job and
-  to the release job that signs and attests; `release.yml` also passes it to the
-  reusable npm workflow. `npm-publish.yml` runs with `contents: read` and
-  `id-token: write` and nothing else; the release job adds `contents: write`
-  (release upload) and `attestations: write` (provenance).
+  to the release job that signs and attests. `npm-publish.yml` runs with
+  `contents: read` and `id-token: write` and nothing else; the release job adds
+  `contents: write` (release upload) and `attestations: write` (provenance).
 - **GitHub-hosted runners only.** The publish job runs on `ubuntu-latest`; the
   provenance attestation records a `github-hosted` builder. Do not move
   publishing to a self-hosted runner.
@@ -512,10 +514,10 @@ reasoning and the procedure if a rewrite is ever required are in
 ## Current state
 
 `0.1.4` (2026-11-10) was the first release published end-to-end through the OIDC
-path. All seven npm packages and PyPI are live at `0.10.3`, and `latest` points
-at it. `v0.10.3` is a **documentation release** with no code or rule changes
-(263 rules in ten families, 14 MCP tools): it publishes the refreshed npm and
-PyPI READMEs and the PyPI classifiers. Release assets are unchanged from 0.10.2.
+path. All seven npm packages and PyPI are live at `0.11.0`, and `latest` points
+at it. `v0.11.0` is a **minor MCP release** with no rule changes (263 rules in
+ten families, 14 MCP tools): read-only/offline modes, path+line addressing,
+bounded output, baseline parity and diff-bound fix approval.
 
 `v0.10.2` is a **security patch release** (263 rules in ten families, 14
 MCP tools): it ships the fixes from the adversarial review of 0.10.1 and is
@@ -573,7 +575,7 @@ attempt. `v0.5.2` contains the corrected CI templates and the post-0.5.1 docs.
 The composite action is listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vigil-security-scan)
 as **Vigil security scan** (Security + Code quality).
 
-**Do not pin `0.5.0`.** Use `0.10.3` or newer, or `@latest`. The `v0.5.0` tag is
+**Do not pin `0.5.0`.** Use `0.11.0` or newer, or `@latest`. The `v0.5.0` tag is
 immutable and still resolves, so pinning it silently keeps the stale templates;
 its GitHub release body carries the warning. The npm package version is marked
 with a deprecation notice (a metadata change, not a republish) once the npm 2FA

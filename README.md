@@ -28,13 +28,12 @@
 | --- | --- | --- |
 | [Install](#install) · [See it work](#see-it-work) · [Quickstart](#60-second-quickstart) · [How it works](#how-it-works) | [MCP setup](#mcp-setup) · [For AI agents](#for-ai-agents) · [Providers](#providers) · [Rules](#rules) · [Configuration](#configuration) | [CI & SARIF](#ci-sarif-and-precheck) · [Safety](#safety) · [Troubleshooting](#troubleshooting) · [Docs](#documentation) |
 
-> **Status: 0.10.3.** If you are on 0.10.1 or older, upgrade: 0.10.2 was a
-> security patch release with the fixes from an adversarial review and a
-> patched Go toolchain, and 0.10.3 is the same code with refreshed package
-> pages ([changelog](CHANGELOG.md)). The deterministic engine, CLI and MCP
-> server are usable today. LLM output is advisory, rule coverage keeps growing,
-> and Vigil is not a replacement for a pentest. Treat every finding as a lead
-> to verify, not a verdict.
+> **Status: 0.11.0.** 0.11 makes the MCP surface contractual: read-only and
+> offline modes, path+line addressing with typed errors, bounded output,
+> baseline parity and diff-bound fix approval. Deterministic scanning still
+> needs no model; LLM output is advisory and Vigil is not a replacement for a
+> pentest. Treat every finding as a lead to verify, not a verdict
+> ([changelog](CHANGELOG.md)).
 
 ## See it work
 
@@ -143,7 +142,7 @@ your machine; every one of them ends at the same `vigil` command.
 | **Windows** | `npm i -g lv24-vigil` or `scoop install lv24/vigil` | `.exe` from [Releases](https://github.com/LevapVeeskela/lv24-vigil/releases), PowerShell installer, Python launcher, container |
 | **macOS** | `npm i -g lv24-vigil` or `brew install LevapVeeskela/tap/vigil` | release binary (Intel and Apple silicon), shell installer, `go install` |
 | **Linux** | `npm i -g lv24-vigil` or `brew install LevapVeeskela/tap/vigil` | `.deb` / `.rpm` / `.apk`, release binary, shell installer, `go install`, container |
-| **CI** | `uses: LevapVeeskela/lv24-vigil@v0.10.3` or the [GitLab template](examples/gitlab-ci.yml) | `npx -y lv24-vigil`, container image |
+| **CI** | `uses: LevapVeeskela/lv24-vigil@v0.11.0` or the [GitLab template](examples/gitlab-ci.yml) | `npx -y lv24-vigil`, container image |
 | **An MCP client** | `npx -y lv24-vigil mcp` | `vigil mcp` after any install below |
 | **Python tooling only** | `pipx install lv24-vigil` or `uvx lv24-vigil` | needs Node.js 18+; see [Python](#python) |
 
@@ -185,7 +184,7 @@ and installers need no runtime.
 
 The `v0.5.0` tag and npm package are immutable and still installable, but the
 CI examples on that tag are stale (`inputs.fail-on`, an unguarded GitLab
-pre-check). The binaries are fine; the templates are not. Use `0.10.3` or
+pre-check). The binaries are fine; the templates are not. Use `0.11.0` or
 newer, or `@latest`.
 
 </details>
@@ -222,9 +221,9 @@ the file from the
 install it by path:
 
 ```bash
-sudo apt install ./vigil-0.10.3-linux-amd64.deb                # Debian, Ubuntu
-sudo dnf install --nogpgcheck ./vigil-0.10.3-linux-amd64.rpm   # Fedora, RHEL, openSUSE
-sudo apk add --allow-untrusted ./vigil-0.10.3-linux-amd64.apk  # Alpine
+sudo apt install ./vigil-0.11.0-linux-amd64.deb                # Debian, Ubuntu
+sudo dnf install --nogpgcheck ./vigil-0.11.0-linux-amd64.rpm   # Fedora, RHEL, openSUSE
+sudo apk add --allow-untrusted ./vigil-0.11.0-linux-amd64.apk  # Alpine
 ```
 
 The packages carry no distribution key, which is why `dnf` and `apk` need the
@@ -270,7 +269,7 @@ running as `nonroot`) is published to GitHub Container Registry for every
 release:
 
 ```bash
-docker run --rm -v "$PWD:/workspace" ghcr.io/levapveeskela/lv24-vigil:0.10.3 scan --no-llm --path /workspace
+docker run --rm -v "$PWD:/workspace" ghcr.io/levapveeskela/lv24-vigil:0.11.0 scan --no-llm --path /workspace
 ```
 
 The local `Dockerfile` builds the same image if you prefer:
@@ -327,14 +326,14 @@ Every release is covered four ways: a keyless cosign signature over
 CycloneDX SBOM, and npm provenance for the packages.
 
 ```bash
-gh release download v0.10.3 --pattern checksums.txt --pattern checksums.txt.sigstore.json
+gh release download v0.11.0 --pattern checksums.txt --pattern checksums.txt.sigstore.json
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
-  --certificate-identity "https://github.com/LevapVeeskela/lv24-vigil/.github/workflows/release.yml@refs/tags/v0.10.3" \
+  --certificate-identity "https://github.com/LevapVeeskela/lv24-vigil/.github/workflows/release.yml@refs/tags/v0.11.0" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt                                   # prints: Verified OK
 sha256sum -c checksums.txt --ignore-missing       # the files you downloaded
-gh attestation verify vigil_0.10.3_linux_amd64 --repo LevapVeeskela/lv24-vigil
+gh attestation verify vigil_0.11.0_linux_amd64 --repo LevapVeeskela/lv24-vigil
 ```
 
 Container digests, npm provenance and the full flow:
@@ -471,9 +470,9 @@ The server exposes 14 tools:
 | `vigil_scan` | Deterministic scan with optional LLM triage; optional OSV | model optional; OSV optional |
 | `vigil_review` | Reviews changed lines or a supplied diff | model optional; OSV optional |
 | `vigil_explain` | Explains one finding and a fix direction | model |
-| `vigil_fix` | Proposes a minimal diff; `apply=true` writes it | model |
+| `vigil_fix` | Proposes a minimal diff; applies exactly the reviewed proposal (`fixId` + `diffSha256`) | model |
 | `vigil_threat_model` | STRIDE-style threat model | model |
-| `vigil_status` | Provider, model, engine, store, baseline, last scan | none |
+| `vigil_status` | Provider, model, rule count, store, modes, network posture, last scan | none |
 | `vigil_rules` | Rule catalog with IDs, severities and categories | none |
 | `vigil_hardening` | VGL-ARE release-hardening gaps, grouped by platform; `platform` narrows one surface | offline |
 | `vigil_mcp_audit` | VGL-MCP configuration gaps in MCP server configs | offline |
@@ -486,7 +485,11 @@ The server exposes 14 tools:
 The same server exposes resources `vigil://status`, `vigil://rules`,
 `vigil://scan/last`, `vigil://scan/<id>` and prompts `security_review`,
 `threat_model`, `fix_finding`, `anti_re_hardening`, `dependency_audit`.
-Only `vigil_fix` with `apply=true` changes source files.
+Only `vigil_fix` with `mode=apply` changes source files, and only the diff a
+human reviewed: propose returns `fixId` and `diffSha256`, apply uses that stored
+diff once and never commits. Start the server with `--read-only` (or
+`VIGIL_MCP_READ_ONLY=1`) to hide the fix tool, or with `--offline` (or
+`VIGIL_MCP_OFFLINE=1`) to run without model or OSV traffic.
 
 Then ask your agent:
 
@@ -523,7 +526,7 @@ prose.
     "vigil_mcp_audit", "vigil_dependencies", "vigil_baseline", "vigil_report",
     "vigil_verify", "vigil_history"
   ],
-  "writes_source_files": ["vigil fix --apply", "vigil_fix apply=true"],
+  "writes_source_files": ["vigil fix --apply", "vigil_fix mode=apply"],
   "network": {
     "none": ["vigil scan --no-llm", "vigil hardening", "vigil mcp-audit", "vigil sbom"],
     "osv": ["vigil dependencies", "vigil_dependencies", "scan.osv: true"],
@@ -560,7 +563,7 @@ prose.
 | `vigil_mcp_audit` | `path`, `includeUser`, `minSeverity`, `maxFindings` | nothing | none |
 | `vigil_dependencies` | `path`, `includeDev`, `maxPackages`, `osvBaseUrl` | nothing | OSV |
 | `vigil_explain` | `findingId`, `scanId` | nothing | model |
-| `vigil_fix` | `findingId`, `scanId`, `apply` | source files when `apply=true` | model |
+| `vigil_fix` | `findingId` or `path`+`line`, `scanId`, `mode`, `fixId`, `diffSha256` | source files only on the bound `mode=apply` | model |
 | `vigil_threat_model` | `path` | nothing | model |
 | `vigil_verify` | `findingId`, `scanId`, `paths` | nothing | none |
 | `vigil_baseline` | `action`, `findingId`, `scanId`, `reason` | the baseline file | none |
@@ -721,7 +724,7 @@ Severity, confidence, baseline and masking details:
 
 - **Read-only by default.** A scan writes no source files; it writes only its
   scan history under `.vigil/scans` (or the user cache). The other write paths
-  are `vigil fix --apply` / `vigil_fix apply=true`, the baseline command, an
+  are `vigil fix --apply` / `vigil_fix mode=apply`, the baseline command, an
   explicitly requested report file, `vigil init` and `vigil hook install`
   (`.git/hooks/<mode>` plus a `.pre-vigil.bak` backup with `--force`). A fix
   never commits and never stages.
@@ -783,7 +786,7 @@ skipping, `autoupdate` and the comparison with `vigil hook install`:
 
 ### GitHub Actions (PR, `main`, manual)
 
-The same action is listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vigil-security-scan). Use `uses: LevapVeeskela/lv24-vigil@v0.10.3`; add `version: 0.10.3` when the CLI must match the action tag.
+The same action is listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vigil-security-scan). Use `uses: LevapVeeskela/lv24-vigil@v0.11.0`; add `version: 0.11.0` when the CLI must match the action tag.
 
 Copy [`examples/github-workflow.yml`](examples/github-workflow.yml) to
 `.github/workflows/vigil.yml`:

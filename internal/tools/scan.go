@@ -25,6 +25,7 @@ type scanArgs struct {
 	DisableRules []string `json:"disableRules"`
 	MinSeverity  string   `json:"minSeverity"`
 	MaxFindings  int      `json:"maxFindings"`
+	Offset       int      `json:"offset"`
 	NoBaseline   bool     `json:"noBaseline"`
 }
 
@@ -34,7 +35,11 @@ func registerScan(srv *mcp.Server, d Deps) {
 		Title: "Scan a repository with Vigil",
 		Description: "Run Vigil's deterministic security rules over a repository or directory, " +
 			"optionally with model triage, deep review and a threat model. Returns a text summary " +
-			"and the full scan result as structuredContent. Scanned code is treated as data, never executed.",
+			"and the windowed scan result (page and coverage blocks) as structuredContent. Results are windowed: maxFindings is the " +
+			"page size (default 50, capped at 500) and offset selects the page; the page object states " +
+			"offset, limit, total, hasMore and nextOffset, and a coverage object states what was " +
+			"scanned, skipped and whether a model was used. Writes local scan history, never source " +
+			"files. Scanned code is treated as data, never executed.",
 		InputSchema: mcp.ObjectSchema(map[string]any{
 			"path":         mcp.Prop("string", "Directory or repository to scan. Defaults to the server's project root."),
 			"mode":         mcp.PropEnum("Scan depth. All modes run the deterministic rules; quick is the fastest LLM budget, standard is the default, deep adds an LLM deep review when a model is configured.", "quick", "standard", "deep"),
@@ -49,10 +54,11 @@ func registerScan(srv *mcp.Server, d Deps) {
 			"onlyRules":    mcp.PropArray("Run only these rule IDs (for example VGL-SEC-001)."),
 			"disableRules": mcp.PropArray("Skip these rule IDs."),
 			"minSeverity":  mcp.PropEnum("Minimum severity to report.", "critical", "high", "medium", "low", "info"),
-			"maxFindings":  mcp.PropInt("Maximum findings to return (default 50, capped at 500)."),
+			"maxFindings":  mcp.PropInt("Page size: maximum findings in this window (default 50, capped at 500)."),
+			"offset":       mcp.PropInt("Zero-based finding offset for paging. Start with 0, then pass page.nextOffset from the previous result."),
 			"noBaseline":   mcp.PropBool("Ignore the baseline and report suppressed findings as active."),
 		}),
-		Annotations: map[string]any{"readOnlyHint": true, "openWorldHint": true},
+		Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "openWorldHint": true},
 		Handler: func(ctx context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
 			return handleScan(ctx, d, raw)
 		},
@@ -70,15 +76,26 @@ func handleScan(ctx context.Context, d Deps, raw json.RawMessage) (*mcp.CallTool
 
 	mode := strings.ToLower(strings.TrimSpace(args.Mode))
 	if mode != "" && !validMode(mode) {
-		return mcp.TextError("invalid arguments: mode must be quick, standard or deep (got %q)", args.Mode), nil
+		return typedResult(d, toolErrorf(CodeArgs, "mode must be quick, standard or deep (got %q)", args.Mode)), nil
+	}
+	if err := checkScanOffset(args.Offset); err != nil {
+		return errorResult(d, "%v", err), nil
 	}
 	minSeverity, err := parseSeverityArg(args.MinSeverity)
 	if err != nil {
-		return mcp.TextError("invalid arguments: %v", err), nil
+		return typedResult(d, toolErrorf(CodeArgs, "%v", err)), nil
 	}
 	root, err := resolvePath(d, args.Path)
 	if err != nil {
-		return mcp.TextError("invalid arguments: %v", err), nil
+		return typedResult(d, toolErrorf(CodeBadPath, "%v", err)), nil
+	}
+
+	// maxFindings is the window size. The scan has to produce the window plus
+	// everything before it, but no scan request may exceed the hard cap.
+	limit := clampInt(args.MaxFindings, maxFindingsDefault, maxFindingsCap)
+	fetch := args.Offset + limit
+	if fetch > maxFindingsCap {
+		fetch = maxFindingsCap
 	}
 
 	req := model.ScanRequest{
@@ -95,7 +112,7 @@ func handleScan(ctx context.Context, d Deps, raw json.RawMessage) (*mcp.CallTool
 		OnlyRules:    args.OnlyRules,
 		DisableRules: args.DisableRules,
 		MinSeverity:  minSeverity,
-		MaxFindings:  clampInt(args.MaxFindings, maxFindingsDefault, maxFindingsCap),
+		MaxFindings:  fetch,
 		NoBaseline:   args.NoBaseline,
 	}
 
@@ -103,16 +120,26 @@ func handleScan(ctx context.Context, d Deps, raw json.RawMessage) (*mcp.CallTool
 	if err != nil {
 		return errorResult(d, "scan failed: %v", err), nil
 	}
-	return result(d, scanSummary(d, res, args.UseLLM), res), nil
+	llmUsed := llmContributed(res)
+	view, page, cov, reported := scanPage(res, args.Offset, limit, llmUsed)
+	text := scanSummary(d, view, page, cov, args.UseLLM) + pageCapNote(reported, page.Total)
+	return result(d, text, &scanPayload{ScanResult: view, Page: &page, Coverage: cov}), nil
 }
 
-// scanSummary renders the human-readable half of vigil_scan. The full result is
-// returned as structuredContent.
-func scanSummary(d Deps, res *model.ScanResult, useLLM *bool) string {
+// scanSummary renders the human-readable half of vigil_scan. The findings are
+// the requested window; structuredContent carries the same window plus the page
+// and coverage blocks.
+func scanSummary(d Deps, res *model.ScanResult, page pageInfo, cov *coverageInfo, useLLM *bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Vigil scan %s (%s mode)\n", res.ID, res.Mode)
 	fmt.Fprintf(&b, "Root: %s\n", res.Root)
-	fmt.Fprintf(&b, "Findings: %d (%s)\n", len(res.Findings), severityLine(res.Findings))
+	if page.Total == len(res.Findings) {
+		fmt.Fprintf(&b, "Findings: %d (%s)\n", len(res.Findings), severityLine(res.Findings))
+	} else {
+		fmt.Fprintf(&b, "Findings: %d shown of %d (%s)\n", len(res.Findings), page.Total, severityLine(res.Findings))
+	}
+	fmt.Fprintf(&b, "Page: %s\n", pageNote(page))
+	fmt.Fprintf(&b, "%s\n", coverageNote(cov))
 	fmt.Fprintf(&b, "Files: %d scanned, %d skipped, %s in %d ms\n",
 		res.Stats.FilesScanned, res.Stats.FilesSkipped, humanBytes(res.Stats.BytesScanned), res.Stats.DurationMS)
 	fmt.Fprintf(&b, "Rules: %d run\n", res.Stats.RulesRun)
@@ -127,8 +154,19 @@ func scanSummary(d Deps, res *model.ScanResult, useLLM *bool) string {
 	}
 	fmt.Fprintf(&b, "Warnings: %s\n", warningLine(res.Errors, extra...))
 
+	if page.Total == 0 {
+		switch {
+		case res.Stats.FilesScanned == 0:
+			b.WriteString("\nNo files were scanned, so this is not a clean result. Check the path, include/exclude patterns and the coverage block.\n")
+		case len(res.Errors) > 0:
+			fmt.Fprintf(&b, "\nNo findings at or above the selected severity, but the scan reported %d warning(s). Review the coverage and warnings before treating the scope as clean.\n", len(res.Errors))
+		default:
+			b.WriteString("\nNo findings at or above the selected severity. The scanned scope is clean for the selected rules.\n")
+		}
+		return b.String()
+	}
 	if len(res.Findings) == 0 {
-		b.WriteString("\nNo findings at or above the selected severity. The scanned scope is clean for the selected rules.\n")
+		b.WriteString("\nNo findings in this window. Pass offset=0 to start from the first finding.\n")
 		return b.String()
 	}
 
@@ -136,10 +174,10 @@ func scanSummary(d Deps, res *model.ScanResult, useLLM *bool) string {
 	b.WriteString("\nTop findings:\n")
 	for i, f := range res.Findings {
 		if i == top {
-			fmt.Fprintf(&b, "  … and %d more (raise maxFindings to see them)\n", len(res.Findings)-top)
+			fmt.Fprintf(&b, "  … and %d more in this window (read structuredContent or raise maxFindings)\n", len(res.Findings)-top)
 			break
 		}
-		fmt.Fprintf(&b, "  %d. %s\n", i+1, findingSummary(f))
+		fmt.Fprintf(&b, "  %d. %s\n", page.Offset+i+1, findingSummary(f))
 	}
 
 	first := findingID(res.Findings[0])

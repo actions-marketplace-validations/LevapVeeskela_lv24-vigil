@@ -245,19 +245,30 @@ type RuleMeta struct {
 
 // Stats summarises a scan.
 type Stats struct {
-	FilesScanned int              `json:"filesScanned"`
-	FilesSkipped int              `json:"filesSkipped"`
-	BytesScanned int64            `json:"bytesScanned"`
-	DurationMS   int64            `json:"durationMs"`
-	BySeverity   map[Severity]int `json:"bySeverity"`
-	ByCategory   map[Category]int `json:"byCategory"`
-	RulesRun     int              `json:"rulesRun"`
-	LLMCalls     int              `json:"llmCalls"`
-	LLMTokens    int              `json:"llmTokens,omitempty"`
+	FilesScanned int   `json:"filesScanned"`
+	FilesSkipped int   `json:"filesSkipped"`
+	BytesScanned int64 `json:"bytesScanned"`
+	DurationMS   int64 `json:"durationMs"`
+	// FindingsTotal is the number of findings at or above the selected
+	// severity before the per-request cap was applied. Paginated callers use
+	// it as the honest total for a window.
+	FindingsTotal int              `json:"findingsTotal,omitempty"`
+	BySeverity    map[Severity]int `json:"bySeverity"`
+	ByCategory    map[Category]int `json:"byCategory"`
+	RulesRun      int              `json:"rulesRun"`
+	LLMCalls      int              `json:"llmCalls"`
+	LLMTokens     int              `json:"llmTokens,omitempty"`
 	// Truncated counts active findings dropped by the max-findings cap. The
 	// most severe findings are kept, so a non-zero value means the result is
 	// incomplete rather than wrong.
 	Truncated int `json:"findingsTruncated,omitempty"`
+	// SkippedReasons counts skipped files by stable reason key, so a caller
+	// can see why coverage is incomplete. The keys are low-cardinality
+	// categories, not per-file paths; FilesSkipped is their sum.
+	SkippedReasons map[string]int `json:"skippedReasons,omitempty"`
+	// OSVQueried reports that an OSV lookup was attempted, not that
+	// advisories were found. It stays true when the lookup failed.
+	OSVQueried bool `json:"osvQueried,omitempty"`
 }
 
 // ModelInfo describes the model that produced LLM judgements.

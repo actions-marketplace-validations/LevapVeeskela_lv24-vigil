@@ -33,6 +33,9 @@ type statusPayload struct {
 	BaseURL     string      `json:"baseUrl,omitempty"`
 	LLM         bool        `json:"llm"`
 	APIKey      string      `json:"apiKey"`
+	ReadOnly    bool        `json:"readOnly"`
+	Offline     bool        `json:"offline"`
+	Network     string      `json:"network"`
 	Rules       int         `json:"rules"`
 	Categories  []string    `json:"categories"`
 	StoreDir    string      `json:"storeDir,omitempty"`
@@ -47,7 +50,8 @@ func registerStatus(srv *mcp.Server, d Deps) {
 		Name:  "vigil_status",
 		Title: "Show Vigil status",
 		Description: "Report the engine version, project root, model configuration (with the key redacted), " +
-			"rule count, categories, store directory, the last scan summary and startup warnings.",
+			"rule count, categories, store directory, the effective read-only and offline modes, the network " +
+			"posture, the last scan summary and startup warnings.",
 		InputSchema: mcp.ObjectSchema(map[string]any{}),
 		Annotations: map[string]any{"readOnlyHint": true, "openWorldHint": false},
 		Handler: func(ctx context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
@@ -74,10 +78,13 @@ func statusPayloadFor(d Deps) statusPayload {
 		Version:    d.Version,
 		LLM:        false,
 		APIKey:     "not set",
+		ReadOnly:   d.ReadOnly,
+		Offline:    d.Offline,
 		Categories: []string{},
 		Warnings:   []string{},
 	}
 	if d.App == nil {
+		p.Network = "none"
 		p.Hint = "vigil is not initialised: no app runtime is attached to this MCP server"
 		return p
 	}
@@ -87,6 +94,7 @@ func statusPayloadFor(d Deps) statusPayload {
 	p.Model = d.App.Config.Model
 	p.BaseURL = redactURL(d.App.Config.BaseURL)
 	p.LLM = d.App.LLM
+	p.Network = networkPosture(d)
 	if d.App.Config.APIKey != "" {
 		p.APIKey = "configured"
 	}
@@ -102,11 +110,37 @@ func statusPayloadFor(d Deps) statusPayload {
 		p.Hint = "No model is configured: deterministic rules only. Set VIGIL_PROVIDER, VIGIL_MODEL and VIGIL_API_KEY " +
 			"(or OLLAMA_HOST) for triage, deep review, fixes and threat models."
 	}
+	if d.ReadOnly {
+		p.Hint = strings.TrimSpace(p.Hint + " Read-only mode is on: vigil_fix is hidden and baseline, source and report writes are rejected.")
+	}
+	if d.Offline {
+		p.Hint = strings.TrimSpace(p.Hint + " Offline mode is on: no model or OSV calls are made.")
+	}
 
 	if last, err := d.App.LastScan(); err == nil {
 		p.LastScan = summarizeScan(last)
 	}
 	return p
+}
+
+// networkPosture names every outbound channel the server can open. It is
+// computed from the effective runtime, not from the flags alone, so a model
+// that failed to initialise does not claim egress.
+func networkPosture(d Deps) string {
+	if d.Offline || d.App == nil {
+		return "none"
+	}
+	parts := make([]string, 0, 2)
+	if d.App.LLM {
+		parts = append(parts, "model")
+	}
+	if d.App.Config.Scan.OSV {
+		parts = append(parts, "osv")
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "+")
 }
 
 func summarizeScan(res *model.ScanResult) *statusScan {
@@ -147,22 +181,30 @@ func categoriesFromMetas(metas []model.RuleMeta) []string {
 }
 
 type historyArgs struct {
-	Limit int `json:"limit"`
+	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
 }
 
 type historyPayload struct {
-	Count int             `json:"count"`
-	Scans []store.Summary `json:"scans"`
+	Count      int             `json:"count"`
+	Total      int             `json:"total"`
+	HasMore    bool            `json:"hasMore"`
+	NextOffset *int            `json:"nextOffset,omitempty"`
+	Page       *pageInfo       `json:"page,omitempty"`
+	Scans      []store.Summary `json:"scans"`
 }
 
 func registerHistory(srv *mcp.Server, d Deps) {
 	srv.AddTool(mcp.Tool{
 		Name:  "vigil_history",
 		Title: "List stored Vigil scans",
-		Description: "List the most recent stored scans with their finding, critical and high counts. " +
-			"Scan IDs can be passed to vigil_explain, vigil_fix, vigil_report and vigil_verify.",
+		Description: "List stored scans, newest first, with their finding, critical and high counts. " +
+			"The response is windowed: limit is the page size (default 10, capped at 100) and offset " +
+			"selects the page; the page object states total, hasMore and nextOffset. Scan IDs can be " +
+			"passed to vigil_explain, vigil_fix, vigil_report and vigil_verify.",
 		InputSchema: mcp.ObjectSchema(map[string]any{
-			"limit": mcp.PropInt("Maximum number of scans to list (default 10, capped at 100)."),
+			"offset": mcp.PropInt("Zero-based scan offset for paging. Start with 0, then pass page.nextOffset from the previous result."),
+			"limit":  mcp.PropInt("Maximum number of scans in this window (default 10, capped at 100)."),
 		}),
 		Annotations: map[string]any{"readOnlyHint": true, "openWorldHint": false},
 		Handler: func(ctx context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
@@ -179,29 +221,47 @@ func handleHistory(d Deps, raw json.RawMessage) (*mcp.CallToolResult, error) {
 	if errRes := decodeArgs(raw, &args); errRes != nil {
 		return errRes, nil
 	}
+	if err := checkOffset(args.Offset); err != nil {
+		return errorResult(d, "%v", err), nil
+	}
 
 	limit := clampInt(args.Limit, 10, 100)
-	summaries, err := d.App.Store.List(limit)
+	// List(0) is the cheapest existing way to learn the honest total: the
+	// store already prunes its history, so this is one directory read.
+	all, err := d.App.Store.List(0)
 	if err != nil {
 		return errorResult(d, "history: %v", err), nil
 	}
+	start, end, page := window(len(all), args.Offset, limit)
+	summaries := all[start:end]
 
 	var b strings.Builder
-	if len(summaries) == 0 {
+	if len(all) == 0 {
 		b.WriteString("No stored scans yet. Run vigil_scan to create one.\n")
 	} else {
-		fmt.Fprintf(&b, "Recent scans (%d, newest first):\n\n", len(summaries))
-		w := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tSTARTED (UTC)\tFINDINGS\tCRITICAL\tHIGH")
-		for _, s := range summaries {
-			fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\n",
-				s.ID, formatScanTime(s.StartedAt), s.Findings, s.Critical, s.High)
+		fmt.Fprintf(&b, "Recent scans (newest first) — %s\n\n", pageNote(page))
+		if len(summaries) == 0 {
+			b.WriteString("No scans in this window.\n")
+		} else {
+			w := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tSTARTED (UTC)\tFINDINGS\tCRITICAL\tHIGH")
+			for _, s := range summaries {
+				fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\n",
+					s.ID, formatScanTime(s.StartedAt), s.Findings, s.Critical, s.High)
+			}
+			_ = w.Flush()
 		}
-		_ = w.Flush()
 		fmt.Fprintf(&b, "\nStore: %s\n", d.App.Store.Dir())
 	}
 
-	payload := historyPayload{Count: len(summaries), Scans: summaries}
+	payload := historyPayload{
+		Count:      len(summaries),
+		Total:      page.Total,
+		HasMore:    page.HasMore,
+		NextOffset: page.NextOffset,
+		Page:       &page,
+		Scans:      summaries,
+	}
 	return result(d, b.String(), payload), nil
 }
 

@@ -30,7 +30,7 @@ func registerReport(srv *mcp.Server, d Deps) {
 			"scanId": mcp.Prop("string", "Scan to render. Defaults to the most recent scan."),
 			"path":   mcp.Prop("string", "Relative path inside the app root to write the report to (for example reports/vigil.md)."),
 		}),
-		Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},
+		Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
 		Handler: func(ctx context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
 			return handleReport(ctx, d, raw)
 		},
@@ -49,6 +49,9 @@ func handleReport(ctx context.Context, d Deps, raw json.RawMessage) (*mcp.CallTo
 	format, err := reportFormat(args.Format)
 	if err != nil {
 		return mcp.TextError("invalid arguments: %v", err), nil
+	}
+	if strings.TrimSpace(args.Path) != "" && d.ReadOnly {
+		return readOnlyResult(d, "vigil_report with a path"), nil
 	}
 	scan, err := loadScan(d, args.ScanID)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/levapveeskela/lv24-vigil/internal/config"
 	"github.com/levapveeskela/lv24-vigil/internal/mcp"
 	"github.com/levapveeskela/lv24-vigil/internal/model"
+	"github.com/levapveeskela/lv24-vigil/internal/rules"
 	"github.com/levapveeskela/lv24-vigil/internal/safepath"
 )
 
@@ -45,17 +46,95 @@ func decodeArgs(raw json.RawMessage, dst any) *mcp.CallToolResult {
 	return nil
 }
 
-// result builds a text result with optional structured content. The text is
-// redacted and truncated; the structured payload is passed through untouched.
+// result builds a text result with optional structured content. The text and
+// every string in the structured payload go through the same redactors, so a
+// client cannot recover a credential by reading structuredContent instead of
+// the text. Redaction is best-effort: only well-known credential shapes and the
+// configured API key are masked.
 func result(d Deps, text string, structured any) *mcp.CallToolResult {
-	res := mcp.TextResult(boundText(redactKey(d, text)))
-	res.StructuredContent = structured
+	res := mcp.TextResult(boundText(redactText(d, text)))
+	if structured == nil {
+		return res
+	}
+	// The round-trip redacts without hand-maintaining a visitor for every
+	// payload type. It preserves the JSON shape clients decode, not the Go
+	// concrete types: a typed payload becomes map[string]any. A payload that
+	// cannot round-trip is returned untouched rather than failing the tool.
+	raw, err := json.Marshal(structured)
+	if err != nil {
+		res.StructuredContent = structured
+		return res
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		res.StructuredContent = structured
+		return res
+	}
+	res.StructuredContent = redactStructured(d, decoded)
 	return res
 }
 
-// errorResult builds an isError result, redacting the configured key.
+// redactText applies the configured-key redactor and the well-known credential
+// shapes to one string.
+func redactText(d Deps, s string) string {
+	return redactKey(d, rules.RedactSecrets(s, nil))
+}
+
+// redactStructured walks a decoded JSON value and applies the text redactors to
+// every string. Object keys are never changed: clients decode by name.
+func redactStructured(d Deps, v any) any {
+	switch value := v.(type) {
+	case map[string]any:
+		for k, inner := range value {
+			value[k] = redactStructured(d, inner)
+		}
+		return value
+	case []any:
+		for i, inner := range value {
+			value[i] = redactStructured(d, inner)
+		}
+		return value
+	case string:
+		return redactText(d, value)
+	default:
+		return v
+	}
+}
+
+// redactedAddedLines reports whether the hard redactor would change an added
+// line of a diff. A masked added line means the human cannot review the bytes
+// that will be written, so the proposal is refused. Removed lines may be
+// masked: apply still removes the raw stored bytes.
+func redactedAddedLines(d Deps, diff string) bool {
+	redacted := redactText(d, diff)
+	if redacted == diff {
+		return false
+	}
+	raw := strings.Split(diff, "\n")
+	masked := strings.Split(redacted, "\n")
+	if len(raw) != len(masked) {
+		return true
+	}
+	for i := range raw {
+		if strings.HasPrefix(raw[i], "+") && !strings.HasPrefix(raw[i], "+++") && raw[i] != masked[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// errorResult builds an isError result, redacting the configured key. A typed
+// error passed as a single %v argument is rendered with its stable code and a
+// structured payload so clients can retry without parsing the message.
 func errorResult(d Deps, format string, args ...any) *mcp.CallToolResult {
-	return mcp.TextError("%s", redactKey(d, fmt.Sprintf(format, args...)))
+	if len(args) == 1 && format == "%v" {
+		if err, ok := args[0].(error); ok {
+			if te := asToolError(err); te != nil {
+				return typedResult(d, te)
+			}
+		}
+	}
+	return mcp.TextError("%s", redactText(d, fmt.Sprintf(format, args...)))
 }
 
 // appReady guards every handler against an uninitialised runtime.
@@ -190,30 +269,31 @@ func loadScan(d Deps, scanID string) (*model.ScanResult, error) {
 	}
 	res, err := d.App.LastScan()
 	if err != nil {
-		return nil, fmt.Errorf("no stored scans yet: %v (run vigil_scan first)", err)
+		return nil, fmt.Errorf("no stored scans yet: %v (run vigil_scan first, or vigil_history to list scans)", err)
 	}
 	return res, nil
 }
 
+// maxCandidates bounds the alternative list attached to a typed lookup error.
+const maxCandidates = 10
+
 // lookupFinding resolves a finding by ID, fingerprint or a unique prefix in a
-// scan (explicit or the latest). On a miss it returns a helpful error listing
-// the findings that are available.
-func lookupFinding(d Deps, scanID, findingID string) (*model.ScanResult, *model.Finding, error) {
-	id := strings.TrimSpace(findingID)
+// scan (explicit or the latest). A prefix that matches several findings is an
+// error: silently returning the first one would explain, fix or verify the
+// wrong issue.
+func lookupFinding(d Deps, scanID, requested string) (*model.ScanResult, *model.Finding, error) {
+	id := strings.TrimSpace(requested)
 	if id == "" {
-		return nil, nil, errors.New("findingId is required")
+		return nil, nil, toolErrorf(CodeArgs, "findingId is required")
 	}
 	res, err := loadScan(d, scanID)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	all := make([]model.Finding, 0, len(res.Findings)+len(res.Suppressed))
-	all = append(all, res.Findings...)
-	all = append(all, res.Suppressed...)
+	all, active := scanFindingEntries(res)
 
 	for i := range all {
-		if strings.EqualFold(all[i].ID, id) {
+		if strings.EqualFold(findingID(all[i]), id) {
 			return res, &all[i], nil
 		}
 	}
@@ -222,36 +302,108 @@ func lookupFinding(d Deps, scanID, findingID string) (*model.ScanResult, *model.
 			return res, &all[i], nil
 		}
 	}
-	if len(id) >= 4 {
-		lower := strings.ToLower(id)
-		for i := range all {
-			if strings.HasPrefix(strings.ToLower(findingFingerprint(all[i])), lower) {
-				return res, &all[i], nil
-			}
-		}
-		for i := range all {
-			if strings.HasPrefix(strings.ToLower(all[i].ID), lower) {
-				return res, &all[i], nil
-			}
-		}
+	if len(id) < 4 {
+		return res, nil, notFoundError(id, res.ID, dedupeFindings(all, active))
 	}
-	return res, nil, fmt.Errorf("finding %q not found in scan %s. Available findings: %s. Use vigil_history to list scans or vigil_scan to create a new one.", id, res.ID, availableFindings(all))
+
+	lower := strings.ToLower(id)
+	matches := make([]model.Finding, 0, 4)
+	activeFingerprints := make(map[string]bool, len(res.Findings))
+	for i := range all {
+		fp := strings.ToLower(findingFingerprint(all[i]))
+		if !strings.HasPrefix(fp, lower) && !strings.HasPrefix(strings.ToLower(findingID(all[i])), lower) {
+			continue
+		}
+		if i >= active {
+			// The same logical finding may be present both active and
+			// suppressed; the active copy is the one the caller means.
+			if activeFingerprints[fp] {
+				continue
+			}
+		} else {
+			activeFingerprints[fp] = true
+		}
+		matches = append(matches, all[i])
+	}
+
+	switch len(matches) {
+	case 1:
+		return res, &matches[0], nil
+	case 0:
+		return res, nil, notFoundError(id, res.ID, dedupeFindings(all, active))
+	default:
+		te := toolErrorf(CodeAmbiguous,
+			"finding %q matches %d findings; pass the full ID, a fingerprint, or path+line", id, len(matches))
+		te.Candidates = candidatesFor(matches)
+		return res, nil, te
+	}
 }
 
-// availableFindings renders a short list of finding IDs for error messages.
-func availableFindings(fs []model.Finding) string {
-	if len(fs) == 0 {
-		return "none (the scan returned no findings)"
+// notFoundError builds a typed miss that lists what the scan does contain, so a
+// client can retry with a real ID.
+func notFoundError(id, scanID string, fs []model.Finding) *ToolError {
+	te := toolErrorf(CodeNotFound,
+		"finding %q not found in scan %s; call vigil_scan or vigil_history, or pass path+line", id, scanID)
+	te.Candidates = candidatesFor(fs)
+	return te
+}
+
+// scanFindingEntries returns every finding in scan order, active first, then
+// suppressed, plus the number of active entries.
+func scanFindingEntries(res *model.ScanResult) ([]model.Finding, int) {
+	if res == nil {
+		return nil, 0
 	}
-	parts := make([]string, 0, 6)
-	for i, f := range fs {
-		if i == 10 {
-			parts = append(parts, fmt.Sprintf("… and %d more", len(fs)-10))
-			break
+	all := make([]model.Finding, 0, len(res.Findings)+len(res.Suppressed))
+	all = append(all, res.Findings...)
+	active := len(all)
+	all = append(all, res.Suppressed...)
+	return all, active
+}
+
+// dedupeFindings drops a suppressed entry whose fingerprint already appears
+// among the active entries: it is the same logical finding and the active copy
+// wins. Duplicates within one list are kept because they can be different
+// locations.
+func dedupeFindings(all []model.Finding, active int) []model.Finding {
+	if active >= len(all) {
+		return all
+	}
+	seen := make(map[string]bool, active)
+	out := make([]model.Finding, 0, len(all))
+	for i := range all {
+		fp := strings.ToLower(findingFingerprint(all[i]))
+		if i >= active && seen[fp] {
+			continue
 		}
-		parts = append(parts, findingID(f)+" ("+locationString(f.Location)+")")
+		if i < active {
+			seen[fp] = true
+		}
+		out = append(out, all[i])
 	}
-	return strings.Join(parts, ", ")
+	return out
+}
+
+// candidatesFor renders up to maxCandidates alternatives in scan order. It
+// carries no snippets or evidence: error paths must not leak code.
+func candidatesFor(fs []model.Finding) []Candidate {
+	if len(fs) == 0 {
+		return nil
+	}
+	n := len(fs)
+	if n > maxCandidates {
+		n = maxCandidates
+	}
+	out := make([]Candidate, 0, n)
+	for _, f := range fs[:n] {
+		out = append(out, Candidate{
+			FindingID: findingID(f),
+			RuleID:    f.RuleID,
+			Location:  locationString(f.Location),
+			Severity:  displaySeverity(f.Severity),
+		})
+	}
+	return out
 }
 
 func findingID(f model.Finding) string {
